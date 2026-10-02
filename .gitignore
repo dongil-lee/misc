@@ -1,0 +1,6 @@
+figs_update/
+*.pdf
+*.tex
+*.log
+*.knit.md
+*_files/

@@ -1,0 +1,1808 @@
+---
+title: "Firsthand Observation and Competing Claims about Electoral Integrity"
+subtitle: "Updated results for discussion with coauthors"
+author: "Dongil Lee"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+params:
+  data_path: "/Users/dlee/Dropbox/Research/emb/analysis/_analysis_V2/emb_data_wide.RData"
+output:
+  pdf_document:
+    latex_engine: xelatex
+    toc: false
+    number_sections: true
+geometry: margin=1in
+fontsize: 11pt
+header-includes:
+  - \usepackage{booktabs}
+  - \usepackage{tabularray}
+  - \usepackage{float}
+  - \usepackage{graphicx}
+  - \newsavebox{\fitbox}
+  - \newcommand{\usefitbox}{\ifdim\dimexpr\ht\fitbox+\dp\fitbox\relax>0.85\textheight\resizebox*{!}{0.85\textheight}{\usebox{\fitbox}}\else\usebox{\fitbox}\fi}
+  - \usepackage[normalem]{ulem}
+  - \UseTblrLibrary{booktabs}
+  - \setcounter{tocdepth}{2}
+  - \usepackage[section]{placeins}
+  - \let\OldSubsection\subsection
+  - \renewcommand{\subsection}{\FloatBarrier\OldSubsection}
+---
+
+<!--
+How to use
+- Set `data_path` above (or knit with params = list(data_path = "...")).
+- Knit to PDF. All tables and figures are built here; nothing is read from
+  01_code_output. Figures are written to the folder figs_update/.
+- The analysis code follows the production script (Sections 0-8). Changes:
+  (1) the prior-belief measure is a parameter, so every measure-specific
+  table and figure is repeated for the 6-item index (main), the 3-item
+  average, and the 1-item measure (Q18_5); (2) the interflex analysis
+  uses the matching continuous measure and median cutoff for each measure;
+  (3) the table p-value formatter is renamed fmt_pval so it does not clash
+  with fmt_p used in the CI-bar figures.
+- Interpretations quote numbers computed in this file. Read the wording
+  again after knitting on the real data.
+-->
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+
+suppressPackageStartupMessages({
+  library(ggplot2)
+  library(dplyr)
+  library(tibble)
+  library(estimatr)
+  library(broom)
+  library(modelsummary)
+  library(patchwork)
+  library(stringr)
+  library(haven)
+  library(magrittr)
+  library(interflex)
+  library(knitr)
+})
+
+options(knitr.kable.NA = "", dplyr.summarise.inform = FALSE)
+
+## lm_robust wrapper: pass weights = NULL explicitly (see production script)
+lm_robust <- function(formula, data, ...) {
+  estimatr::lm_robust(formula, data = data, weights = NULL, ...)
+}
+
+## Output helpers ---------------------------------------------------------------
+## Tables and figures are written as raw LaTeX so that captions, float
+## placement, and table notes are the same in every section.
+FIG_DIR <- "figs_update"
+dir.create(FIG_DIR, showWarnings = FALSE)
+.fig_id <- 0
+
+emit_fig <- function(p, caption, w = 10, h = 5, maxh = 0.80) {
+  .fig_id <<- .fig_id + 1
+  f <- file.path(FIG_DIR, sprintf("fig_%03d.pdf", .fig_id))
+  suppressWarnings(ggsave(f, plot = p, width = w, height = h, bg = "white"))
+  cat("\n\n```{=latex}\n\\begin{figure}[!htbp]\n\\centering\n",
+      sprintf("\\includegraphics[width=\\linewidth,height=%.2f\\textheight,keepaspectratio]{%s}\n",
+              maxh, f),
+      "\\caption{", caption, "}\n\\end{figure}\n```\n\n", sep = "")
+}
+
+emit_tbl <- function(tex, caption, small = FALSE, fit = FALSE) {
+  tex <- paste(tex, collapse = "\n")
+  # drop any float wrapper written by modelsummary / tinytable
+  tex <- gsub("\\\\begin\\{table\\}(\\[[^]]*\\])?", "", tex)
+  tex <- gsub("\\\\end\\{table\\}", "", tex)
+  tex <- gsub("\\\\centering", "", tex)
+  cat("\n\n```{=latex}\n\\begin{table}[!htbp]\n\\centering\n",
+      if (small) "\\footnotesize\n",
+      "\\caption{", caption, "}\n",
+      # long tables: typeset into a box first, then shrink it to fit the page
+      # (tabularray cannot sit directly inside \\resizebox)
+      if (fit) "\\begin{lrbox}{\\fitbox}\\begin{minipage}{\\linewidth}\n",
+      tex,
+      if (fit) "\n\\end{minipage}\\end{lrbox}\n\\usefitbox",
+      "\n\\end{table}\n```\n\n", sep = "")
+}
+
+emit_md <- function(...) cat("\n\n", ..., "\n\n", sep = "")
+
+## Try a figure or table; print a short message instead of stopping the knit
+safely <- function(expr, what) {
+  tryCatch(expr, error = function(e)
+    emit_md("*", what, " could not be produced: ", conditionMessage(e), "*"))
+}
+```
+
+```{r data, include = FALSE}
+# =============================================================================
+# 0. DATA LOADING, CLEANING, AND PRIOR-BELIEF MEASURES (production Section 0)
+# =============================================================================
+loaded_objects <- load(params$data_path)
+df_original <- get(loaded_objects[1])
+
+df <- df_original |>
+  mutate(across(
+    where(haven::is.labelled),
+    list(num = as.numeric, lab = as_factor),
+    .names = "{.col}_{.fn}"
+  ))
+
+df <- df |>
+  mutate(
+    male     = as.numeric(Q26 == 1),
+    age      = 2025 - Q27,
+    married  = as.numeric(Q81 == 2),
+    edu_high = as.numeric(Q82 == 1),
+    edu_univ = as.numeric(Q82 == 2),
+    edu_grad = as.numeric(Q82 == 3)
+  )
+
+df$vignette                           <- NA_real_
+df$vignette[df$exp_cond == "Control"] <- 0
+df$vignette[df$exp_cond == "Fraud"]   <- 1
+df$vignette[df$exp_cond == "Counter"] <- 2
+
+df$type_4                                <- NA_real_
+df$type_4[df$new_type == "pre_partisan"] <- 1
+df$type_4[df$new_type == "pre_citizen"]  <- 2
+df$type_4[df$new_type == "main"]         <- 3
+df$type_4[df$new_type == "pre2"]         <- 4
+
+df$citizen_all                          <- NA_real_
+df$citizen_all[df$type_4 == 1]          <- 0
+df$citizen_all[df$type_4 == 2]          <- 1
+df$citizen_all[df$type_4 %in% c(3, 4)]  <- 0
+
+## Q18 items to a common 1-4 scale (higher = stronger conspiracy belief;
+## "don't know" = NA)
+trust_map <- c("1" = 1, "2" = 2, "3" = 3, "6" = 4, "5" = NA)
+for (y in c("Q18_1_base", "Q18_4_base", "Q18_7_base")) {
+  x <- as.numeric(df[[y]])
+  df[[paste0(y, "_re")]] <- unname(trust_map[as.character(x)])
+}
+consp_map <- c("1" = 4, "2" = 3, "3" = 2, "6" = 1, "5" = NA)
+for (y in c("Q18_2_base", "Q18_5_base", "Q18_8_base")) {
+  x <- as.numeric(df[[y]])
+  df[[paste0(y, "_re")]] <- unname(consp_map[as.character(x)])
+}
+
+## Prior-belief measures: averages of 1 to 6 items
+CONSP_ITEMS <- list(
+  "1avg" = c("Q18_5"),
+  "2avg" = c("Q18_2", "Q18_5"),
+  "3avg" = c("Q18_2", "Q18_5", "Q18_8"),
+  "4avg" = c("Q18_2", "Q18_4", "Q18_5", "Q18_8"),
+  "5avg" = c("Q18_2", "Q18_4", "Q18_5", "Q18_7", "Q18_8"),
+  "main" = c("Q18_1", "Q18_2", "Q18_4", "Q18_5", "Q18_7", "Q18_8")
+)
+CONSP_ORDER <- c("main", "1avg", "2avg", "3avg", "4avg", "5avg")
+
+CONSP_CONT   <- sapply(CONSP_ORDER, function(k)
+  if (k == "main") "conspiracy_belief" else paste0("conspiracy_belief_", k))
+CONSP_HIGH   <- sub("conspiracy_belief", "conspiracy_high", CONSP_CONT)
+CONSP_SUFFIX <- setNames(ifelse(CONSP_ORDER == "main", "", paste0("_", CONSP_ORDER)),
+                         CONSP_ORDER)
+CONSP_NOTE   <- sapply(CONSP_ORDER, function(k) {
+  it <- CONSP_ITEMS[[k]]
+  paste0("Prior belief: median split of the ",
+         if (length(it) == 1) "single item " else paste0(length(it), "-item average of "),
+         paste(sub("Q18_", "Q18\\\\_", it), collapse = ", "), ".")
+})
+
+for (k in CONSP_ORDER) {
+  cols <- paste0(CONSP_ITEMS[[k]], "_base_re")
+  v    <- rowMeans(df[, cols, drop = FALSE], na.rm = TRUE)
+  v[is.nan(v)] <- NA
+  df[[CONSP_CONT[[k]]]] <- v
+}
+
+df_cit <- df |> filter(citizen_all == 1)
+
+## Median splits on the citizen sample (1 = above the median)
+CONSP_MED <- sapply(CONSP_ORDER, function(k) median(df_cit[[CONSP_CONT[[k]]]], na.rm = TRUE))
+for (k in CONSP_ORDER) {
+  df_cit[[CONSP_HIGH[[k]]]] <- as.integer(df_cit[[CONSP_CONT[[k]]]] > CONSP_MED[[k]])
+}
+med_6 <- CONSP_MED[["main"]]
+
+## Other moderators (robustness)
+med_fair <- median(df_cit$Q22_base, na.rm = TRUE)
+df_cit <- df_cit |>
+  mutate(
+    ppp_id        = case_when(Q32_base == 2 ~ 1L, Q33_base == 2 ~ 1L, TRUE ~ 0L),
+    fairness_high = as.integer(as.numeric(Q22_base) >= med_fair)
+  )
+
+## Covariate sets
+X_DEMO <- c("male", "age", "married", "edu_univ", "edu_grad")
+COV_SETS    <- list(nocov = NULL, cov1 = X_DEMO)
+COV_LAB     <- c(nocov = "No covariates", cov1 = "Demographic controls")
+COV_ROW_LAB <- c(cov1 = "Demographic controls")
+rhs_cov <- function(set) {
+  x <- COV_SETS[[set]]
+  if (is.null(x)) "" else paste("+", paste(x, collapse = " + "))
+}
+
+## Measures reported in this document
+REPORT_MODS <- c(main = "6-item index", "3avg" = "3-item average", "1avg" = "1-item measure")
+```
+
+```{r helpers_tables, include = FALSE}
+# =============================================================================
+# 1. SUMMARY STATISTICS AND COVARIATE BALANCE (production Section 1)
+# =============================================================================
+OUTCOME_VARS    <- c("Q119", "Q122", "Q123")
+TREATMENT_VARS  <- c("treat_control", "treat_fraud", "treat_counter", "yes")
+CONSPIRACY_VARS <- c("Q18_1_base_re", "Q18_4_base_re", "Q18_7_base_re",
+                     "Q18_2_base_re", "Q18_5_base_re", "Q18_8_base_re")
+COVARIATE_VARS  <- X_DEMO
+
+df_cit <- df_cit |>
+  mutate(
+    treat_control = as.numeric(vignette == 0),
+    treat_fraud   = as.numeric(vignette == 1),
+    treat_counter = as.numeric(vignette == 2)
+  )
+
+VAR_LABELS <- c(
+  Q119          = "Perceived election fraud",
+  Q122          = "Trust in election administration",
+  Q123          = "Voting intention",
+  treat_control = "Control vignette",
+  treat_fraud   = "Election fraud claims vignette",
+  treat_counter = "Fraud claims with official rebuttal vignette",
+  yes           = "Observer (selected by lottery)",
+  Q18_1_base_re = "Votes are not counted accurately",
+  Q18_4_base_re = "NEC does not manage elections fairly",
+  Q18_7_base_re = "Procedures are not followed accurately",
+  Q18_2_base_re = "Early voting is likely manipulated",
+  Q18_5_base_re = "China is likely to interfere in elections",
+  Q18_8_base_re = "Errors are evidence of fraud",
+  male          = "Male",
+  age           = "Age",
+  married       = "Married",
+  edu_univ      = "University education",
+  edu_grad      = "Graduate education"
+)
+lab <- function(x) ifelse(x %in% names(VAR_LABELS), VAR_LABELS[x], x)
+
+esc_latex <- function(x) {
+  x <- gsub("\\\\", "\\\\textbackslash{}", x)
+  x <- gsub("([_%&#$])", "\\\\\\1", x, perl = TRUE)
+  x
+}
+fmt_num  <- function(x, digits = 3) ifelse(is.na(x), "", sprintf(paste0("%.", digits, "f"), x))
+fmt_pval <- function(p) ifelse(is.na(p), "", ifelse(p < 0.001, "<0.001", sprintf("%.3f", p)))
+
+summary_rows <- function(data, vars, panel_label) {
+  lapply(vars, function(v) {
+    x <- as.numeric(data[[v]])
+    data.frame(panel = panel_label, variable = lab(v),
+               mean = mean(x, na.rm = TRUE), sd = sd(x, na.rm = TRUE),
+               min = suppressWarnings(min(x, na.rm = TRUE)),
+               max = suppressWarnings(max(x, na.rm = TRUE)),
+               n = sum(!is.na(x)), stringsAsFactors = FALSE)
+  }) |> bind_rows()
+}
+
+make_sum_stat_tex <- function(d) {
+  lines <- c(
+    "\\begin{tblr}{colspec={X[l]rrrrr}, width=\\linewidth, cells={font=\\footnotesize}}",
+    "\\toprule",
+    "Variable & Mean & Std. dev. & Min. & Max. & N \\\\",
+    "\\midrule")
+  for (p in unique(d$panel)) {
+    lines <- c(lines, paste0("\\SetCell[c=6]{l}\\textbf{", esc_latex(p), "} & & & & & \\\\"))
+    dd <- d[d$panel == p, ]
+    for (i in seq_len(nrow(dd))) {
+      lines <- c(lines, paste0(esc_latex(dd$variable[i]), " & ", fmt_num(dd$mean[i]), " & ",
+                               fmt_num(dd$sd[i]), " & ", fmt_num(dd$min[i]), " & ",
+                               fmt_num(dd$max[i]), " & ", dd$n[i], " \\\\"))
+    }
+  }
+  lines <- c(lines, "\\bottomrule", "\\end{tblr}", "", "\\vspace{0.5em}", "",
+             "\\begin{minipage}{\\linewidth}", "\\footnotesize",
+             paste0("\\textit{Note:} Conspiracy belief items are coded 1--4, with higher values ",
+                    "indicating stronger conspiracy belief; ``don't know'' responses are coded as missing."),
+             "\\end{minipage}")
+  paste(lines, collapse = "\n")
+}
+
+balance_two_groups <- function(data, vars, group_var) {
+  lapply(vars, function(v) {
+    d  <- data |> filter(!is.na(.data[[v]]), !is.na(.data[[group_var]]))
+    x1 <- d |> filter(.data[[group_var]] == 1) |> pull(.data[[v]])
+    x0 <- d |> filter(.data[[group_var]] == 0) |> pull(.data[[v]])
+    p  <- tryCatch(t.test(x1, x0)$p.value, error = function(e) NA_real_)
+    data.frame(variable = lab(v), mean_one = mean(x1), mean_zero = mean(x0),
+               diff = mean(x1) - mean(x0), p_value = p,
+               n = length(x1) + length(x0), stringsAsFactors = FALSE)
+  }) |> bind_rows()
+}
+
+make_cov_bal_1_tex <- function(d) {
+  lines <- c(
+    "\\begin{tblr}{colspec={X[l]rrrrr}, width=\\linewidth}",
+    "\\toprule",
+    "Variable & Observers & Non-observers & Difference & $p$-value & N \\\\",
+    "\\midrule")
+  for (i in seq_len(nrow(d))) {
+    lines <- c(lines, paste0(esc_latex(d$variable[i]), " & ", fmt_num(d$mean_one[i]), " & ",
+                             fmt_num(d$mean_zero[i]), " & ", fmt_num(d$diff[i]), " & ",
+                             fmt_pval(d$p_value[i]), " & ", d$n[i], " \\\\"))
+  }
+  paste(c(lines, "\\bottomrule", "\\end{tblr}"), collapse = "\n")
+}
+
+balance_three_groups <- function(data, vars, group_var = "vignette") {
+  lapply(vars, function(v) {
+    d <- data |> filter(!is.na(.data[[v]]), !is.na(.data[[group_var]]))
+    p <- tryCatch({
+      fs <- summary(lm(as.formula(paste(v, "~ factor(", group_var, ")")), data = d))$fstatistic
+      pf(fs[1], fs[2], fs[3], lower.tail = FALSE)
+    }, error = function(e) NA_real_)
+    data.frame(variable = lab(v),
+               mean_control = mean(d[[v]][d[[group_var]] == 0]),
+               mean_fraud   = mean(d[[v]][d[[group_var]] == 1]),
+               mean_counter = mean(d[[v]][d[[group_var]] == 2]),
+               p_value = unname(p), n = nrow(d), stringsAsFactors = FALSE)
+  }) |> bind_rows()
+}
+
+make_cov_bal_2_tex <- function(d) {
+  lines <- c(
+    "\\begin{tblr}{colspec={X[l]rrrrr}, width=\\linewidth}",
+    "\\toprule",
+    "Variable & Control & Fraud & Fraud + rebuttal & $p$-value & N \\\\",
+    "\\midrule")
+  for (i in seq_len(nrow(d))) {
+    lines <- c(lines, paste0(esc_latex(d$variable[i]), " & ", fmt_num(d$mean_control[i]), " & ",
+                             fmt_num(d$mean_fraud[i]), " & ", fmt_num(d$mean_counter[i]), " & ",
+                             fmt_pval(d$p_value[i]), " & ", d$n[i], " \\\\"))
+  }
+  paste(c(lines, "\\bottomrule", "\\end{tblr}"), collapse = "\n")
+}
+
+sum_df <- bind_rows(
+  summary_rows(df_cit, OUTCOME_VARS,    "Panel A. Outcome variables"),
+  summary_rows(df_cit, TREATMENT_VARS,  "Panel B. Treatment variables"),
+  summary_rows(df_cit, CONSPIRACY_VARS, "Panel C. Conspiracy belief index items"),
+  summary_rows(df_cit, X_DEMO,          "Panel D. Demographic controls")
+)
+bal_part <- balance_two_groups(df_cit, COVARIATE_VARS, "yes")
+bal_vig  <- balance_three_groups(df_cit, COVARIATE_VARS, "vignette")
+```
+
+```{r helpers_figs_regs, include = FALSE}
+# =============================================================================
+# 2-6. CI-BAR FIGURES AND REGRESSION TABLES (production Sections 2-6)
+# =============================================================================
+fmt_p <- function(p) sprintf("p = %.3f", p)
+
+ci_data <- function(data, var, grp) {
+  data |>
+    filter(!is.na(.data[[var]]), !is.na(.data[[grp]])) |>
+    group_by(.data[[grp]]) |>
+    summarise(mean = mean(.data[[var]]), se = sd(.data[[var]]) / sqrt(n()),
+              lo = mean - 1.96 * se, hi = mean + 1.96 * se, .groups = "drop") |>
+    rename(group = 1)
+}
+
+get_pvals <- function(data, var) {
+  d  <- data |> filter(!is.na(vignette), !is.na(.data[[var]]))
+  tp <- function(v1, v2) {
+    dd <- d |> filter(vignette %in% c(v1, v2))
+    tryCatch(t.test(dd[[var]] ~ dd$vignette)$p.value, error = function(e) NA_real_)
+  }
+  list(p_cf = tp(0, 1), p_cc = tp(0, 2), p_fc = tp(1, 2))
+}
+
+make_cibar_panel <- function(data, var, title, y_label = "Outcome", y_offset = 0) {
+  pv <- get_pvals(data, var)
+  ggplot(ci_data(data, var, "vignette"),
+         aes(x = factor(group, levels = c(0, 1, 2),
+                        labels = c("Control", "Fraud", "Fraud +\nRebuttal")), y = mean)) +
+    geom_bar(stat = "identity", fill = "#4472C4", width = 0.6) +
+    geom_errorbar(aes(ymin = lo, ymax = hi), width = 0.2) +
+    annotate("segment", x = 1, xend = 2, y = 4.2 + y_offset, yend = 4.2 + y_offset) +
+    annotate("segment", x = 1, xend = 1, y = 4.1 + y_offset, yend = 4.2 + y_offset) +
+    annotate("segment", x = 2, xend = 2, y = 4.1 + y_offset, yend = 4.2 + y_offset) +
+    annotate("text", x = 1.5, y = 4.35 + y_offset, label = fmt_p(pv$p_cf), size = 4) +
+    annotate("segment", x = 1, xend = 3, y = 4.6 + y_offset, yend = 4.6 + y_offset) +
+    annotate("segment", x = 1, xend = 1, y = 4.5 + y_offset, yend = 4.6 + y_offset) +
+    annotate("segment", x = 3, xend = 3, y = 4.5 + y_offset, yend = 4.6 + y_offset) +
+    annotate("text", x = 2, y = 4.75 + y_offset, label = fmt_p(pv$p_cc), size = 4) +
+    annotate("segment", x = 2, xend = 3, y = 5.0 + y_offset, yend = 5.0 + y_offset) +
+    annotate("segment", x = 2, xend = 2, y = 4.9 + y_offset, yend = 5.0 + y_offset) +
+    annotate("segment", x = 3, xend = 3, y = 4.9 + y_offset, yend = 5.0 + y_offset) +
+    annotate("text", x = 2.5, y = 5.15 + y_offset, label = fmt_p(pv$p_fc), size = 4) +
+    scale_y_continuous(breaks = 1:5,
+                       labels = c("Not at all", "Not much", "Neutral", "Somewhat", "Very much")) +
+    coord_cartesian(ylim = c(1, 5.5 + y_offset)) +
+    labs(x = "Vignette", y = y_label, title = title) +
+    theme_classic(base_size = 13) +
+    theme(plot.title = element_text(size = 15, face = "bold"),
+          axis.title = element_text(size = 13),
+          axis.text  = element_text(size = 12))
+}
+
+out_label <- function(var) switch(var,
+  Q119 = "Perceived Prob of Fraud",
+  Q122 = "Trust in election administration",
+  Q123 = "Plan to vote")
+out_caption <- function(var) switch(var,
+  Q119 = "Do you think this incident could actually be a case of election fraud or a serious procedural problem?",
+  Q122 = "Despite this incident, do you think the election administration process can still be trusted?",
+  Q123 = "Despite this incident, do you plan to vote in the next election?")
+out_short <- function(var) switch(var,
+  Q119 = "perceived fraud or procedural problems (Q119)",
+  Q122 = "trust in election administration (Q122)",
+  Q123 = "voting intention (Q123)")
+
+cap_annot <- function(var) plot_annotation(
+  caption = str_wrap(out_caption(var), width = 80),
+  theme   = theme(plot.caption = element_text(size = 17)))
+
+## 3a. Observers vs. non-observers
+cibar_by_obs <- function(var) {
+  (make_cibar_panel(df_cit |> filter(yes == 1), var, "Among Observers", out_label(var)) +
+     make_cibar_panel(df_cit |> filter(yes == 0), var, "Among Non-observers", out_label(var))) +
+    plot_layout(axis_titles = "collect") + cap_annot(var)
+}
+
+## 3b. Observation x prior belief (4 panels), for any measure
+cibar_by_belief <- function(var, mod = "main") {
+  hv  <- CONSP_HIGH[[mod]]
+  sub <- function(h, o) df_cit |> filter(.data[[hv]] == h, yes == o)
+  off <- if (var == "Q122") 0.6 else 0
+  ((make_cibar_panel(sub(1, 1), var, "High Prior Belief: Observers", out_label(var)) +
+      make_cibar_panel(sub(1, 0), var, "High Prior Belief: Non-observers", out_label(var))) /
+     (make_cibar_panel(sub(0, 1), var, "Low Prior Belief: Observers", out_label(var), off) +
+        make_cibar_panel(sub(0, 0), var, "Low Prior Belief: Non-observers", out_label(var), off))) +
+    plot_layout(axis_titles = "collect") + cap_annot(var)
+}
+
+## 4-6. Regression tables ------------------------------------------------------
+COL_COV <- c("nocov", "cov1", "nocov", "cov1")
+fit_4models <- function(var, data) {
+  f <- function(rhs) lm_robust(as.formula(paste(var, "~", rhs)), data = data)
+  setNames(list(
+    f(paste("factor(vignette) + yes",         rhs_cov("nocov"))),
+    f(paste("factor(vignette) + yes",         rhs_cov("cov1"))),
+    f(paste("factor(vignette) * factor(yes)", rhs_cov("nocov"))),
+    f(paste("factor(vignette) * factor(yes)", rhs_cov("cov1")))
+  ), paste0("(", 1:4, ")"))
+}
+
+## The observer term is named "yes", "yesTRUE", "factor(yes)TRUE", or
+## "factor(yes)1" depending on how `yes` is stored; all map to "Observer".
+COEF_MAP_MAIN <- c(
+  "factor(vignette)1"                 = "Fraud",
+  "factor(vignette)2"                 = "Fraud + Rebuttal",
+  "yes"                               = "Observer",
+  "yesTRUE"                           = "Observer",
+  "factor(yes)TRUE"                   = "Observer",
+  "factor(yes)1"                      = "Observer",
+  "factor(vignette)1:factor(yes)TRUE" = "Fraud $\\times$ Observer",
+  "factor(vignette)1:factor(yes)1"    = "Fraud $\\times$ Observer",
+  "factor(vignette)2:factor(yes)TRUE" = "(Fraud + Rebuttal) $\\times$ Observer",
+  "factor(vignette)2:factor(yes)1"    = "(Fraud + Rebuttal) $\\times$ Observer"
+)
+GOF_MAP <- list(list(raw = "r.squared", clean = "R$^2$", fmt = 3),
+                list(raw = "nobs",      clean = "N",     fmt = 0))
+STARS <- c("*" = 0.1, "**" = 0.05, "***" = 0.01)
+
+make_add_rows <- function(cov_by_col, means, sds, ncoef, panel_label = NULL) {
+  k   <- length(cov_by_col)
+  chk <- function(set) ifelse(cov_by_col == set, "$\\checkmark$", "")
+  rows <- rbind(c(COV_ROW_LAB[["cov1"]], chk("cov1")),
+                c("Outcome mean",        means),
+                c("Outcome std. dev.",   sds))
+  n_stat <- nrow(rows); off <- 0
+  if (!is.null(panel_label)) {
+    rows <- rbind(c(paste0("\\SetCell[c=", k + 1, "]{l}\\textbf{", panel_label, "}"), rep("", k)),
+                  rows)
+    off <- 1
+  }
+  r <- as.data.frame(rows, stringsAsFactors = FALSE)
+  names(r) <- c("term", paste0("(", seq_len(k), ")"))
+  pos <- off + 2 * ncoef + seq_len(n_stat)
+  attr(r, "position") <- if (off == 1) c(1, pos) else pos
+  r
+}
+
+patch_tblr <- function(tbl, n_models, header_label = NULL, header_span = NULL,
+                       col_names = NULL, stat_marker = COV_ROW_LAB[["cov1"]],
+                       panel_rule = FALSE) {
+  s <- paste(tbl, collapse = "\n")
+  K <- n_models + 1
+  hdr_pat <- paste0("& ", paste0("\\(", seq_len(n_models), "\\)", collapse = " & "), " \\\\\\\\")
+  cols    <- if (is.null(col_names)) paste0("(", seq_len(n_models), ")") else col_names
+  hdr_new <- paste0("& ", paste(cols, collapse = " & "), " \\\\")
+  multi <- length(header_label) > 1
+  if (!is.null(header_label)) {
+    if (is.null(header_span)) header_span <- n_models
+    cells <- unlist(mapply(function(lab, k)
+      c(paste0("\\SetCell[c=", k, "]{c} ", lab), rep("", k - 1)),
+      header_label, header_span, SIMPLIFY = FALSE))
+    grp_row <- paste0("& ", paste(cells, collapse = " & "), " \\\\")
+    if (multi) {
+      starts <- 2 + cumsum(c(0, head(header_span, -1)))
+      ends   <- starts + header_span - 1
+      cmid   <- paste(sprintf("\\cmidrule[lr]{%d-%d}", starts, ends), collapse = " ")
+      hdr_new <- paste0(grp_row, "\n", cmid, "\n", hdr_new)
+    } else {
+      hdr_new <- paste0(grp_row, "\n", hdr_new)
+    }
+  }
+  stopifnot(str_detect(s, hdr_pat))
+  s <- str_replace(s, hdr_pat, function(x) hdr_new)
+  s <- str_replace_all(s, "hline\\{[^}]*\\}=\\{[^}]*\\}\\{[^}]*\\},?[ \t]*\n?", "")
+  lines <- strsplit(s, "\n")[[1]]
+  begin <- grep("\\\\begin\\{(tall)?tblr\\}", lines)[1]
+  end   <- grep("\\\\end\\{(tall)?tblr\\}",   lines)[1]
+  body     <- lines[(begin + 1):(end - 1)]
+  rows     <- body[grepl("\\\\\\\\\\s*$", body)]
+  n_rows   <- length(rows)
+  n_hdr    <- if (is.null(header_label)) 1 else 2
+  stat_row <- which(startsWith(trimws(rows), stat_marker))[1]
+  r <- function(i, from = 1, w = "0.05em") sprintf("hline{%d}={%d-%d}{solid, black, %s},", i, from, K, w)
+  hl <- c(r(1, w = "0.08em"),
+          if (!is.null(header_label) && !multi) r(2, from = 2),
+          r(n_hdr + 1),
+          if (panel_rule) r(n_hdr + 2),
+          r(stat_row),
+          r(n_rows + 1, w = "0.08em"))
+  str_replace(s, "colspec=\\{[^}]*\\},", function(x) paste0(x, "\n", paste(hl, collapse = "\n")))
+}
+
+make_main_latex_tbl <- function(mods, data, var, panel_label = NULL) {
+  m <- as.character(round(mean(data[[var]], na.rm = TRUE), 3))
+  s <- as.character(round(sd(data[[var]],   na.rm = TRUE), 3))
+  tbl <- modelsummary(
+    mods, coef_map = COEF_MAP_MAIN, stars = STARS, gof_map = GOF_MAP,
+    add_rows = make_add_rows(COL_COV, rep(m, 4), rep(s, 4), ncoef = 5, panel_label = panel_label),
+    escape = FALSE, output = "latex")
+  patch_tblr(tbl, n_models = 4, header_label = out_label(var))
+}
+
+## Pooled table (production Section 4)
+tbl_pooled <- function(var) make_main_latex_tbl(fit_4models(var, df_cit), df_cit, var)
+
+## Prior-belief subgroup tables (production Section 5), for any measure
+tbl_by_belief <- function(var, mod = "main") {
+  hv   <- CONSP_HIGH[[mod]]
+  d_hi <- df_cit |> filter(.data[[hv]] == 1)
+  d_lo <- df_cit |> filter(.data[[hv]] == 0)
+  paste(make_main_latex_tbl(fit_4models(var, d_hi), d_hi, var,
+                            panel_label = "Panel A. Sample: High prior beliefs"),
+        "\n\n\\vspace{1em}\n\n",
+        make_main_latex_tbl(fit_4models(var, d_lo), d_lo, var,
+                            panel_label = "Panel B. Sample: Low prior beliefs"))
+}
+
+## Three-way interaction table (production Section 6), for any measure
+COEF_MAP_3WAY <- c(
+  "fraud"               = "Fraud",
+  "rebut"               = "Fraud + Rebuttal",
+  "observer"            = "Observer",
+  "high"                = "High prior belief",
+  "fraud:observer"      = "Fraud $\\times$ Observer",
+  "rebut:observer"      = "(Fraud + Rebuttal) $\\times$ Observer",
+  "fraud:high"          = "Fraud $\\times$ High prior belief",
+  "rebut:high"          = "(Fraud + Rebuttal) $\\times$ High prior belief",
+  "observer:high"       = "Observer $\\times$ High prior belief",
+  "fraud:observer:high" = "Fraud $\\times$ Observer $\\times$ High prior belief",
+  "rebut:observer:high" = "(Fraud + Rebuttal) $\\times$ Observer $\\times$ High prior belief",
+  "(Intercept)"         = "Constant"
+)
+
+tbl_threeway <- function(mod = "main") {
+  d3 <- df_cit |>
+    mutate(fraud = as.integer(vignette == 1), rebut = as.integer(vignette == 2),
+           observer = as.integer(yes), high = .data[[CONSP_HIGH[[mod]]]]) |>
+    filter(!is.na(high))
+  mods_3w <- list(); means_3w <- c(); sds_3w <- c(); cov_3w <- c()
+  for (VAR in c("Q119", "Q122")) {
+    for (cs in names(COV_SETS)) {
+      f <- as.formula(paste(VAR, "~ (fraud + rebut) * observer * high", rhs_cov(cs)))
+      mods_3w[[length(mods_3w) + 1]] <- lm_robust(f, data = d3)
+      means_3w <- c(means_3w, as.character(round(mean(d3[[VAR]], na.rm = TRUE), 3)))
+      sds_3w   <- c(sds_3w,   as.character(round(sd(d3[[VAR]],   na.rm = TRUE), 3)))
+      cov_3w   <- c(cov_3w, cs)
+    }
+  }
+  names(mods_3w) <- paste0("(", seq_along(mods_3w), ")")
+  tbl <- modelsummary(
+    mods_3w, coef_map = COEF_MAP_3WAY, stars = STARS, gof_map = GOF_MAP,
+    add_rows = make_add_rows(cov_3w, means_3w, sds_3w, ncoef = length(COEF_MAP_3WAY)),
+    escape = FALSE, output = "latex")
+  patch_tblr(tbl, n_models = 4, header_label = c(out_label("Q119"), out_label("Q122")),
+             header_span = c(2, 2))
+}
+```
+
+```{r contrasts, include = FALSE}
+# =============================================================================
+# 7. CELL-MEANS CONTRASTS (production Section 7)
+# =============================================================================
+df_cit <- df_cit |>
+  mutate(
+    vig   = factor(vignette, levels = 0:2, labels = c("C", "F", "R")),
+    obs   = factor(as.integer(yes), levels = 0:1, labels = c("Non", "Obs")),
+    cell3 = vig,
+    cell6 = interaction(obs, vig, sep = "_", drop = TRUE)
+  )
+
+MODERATORS <- CONSP_HIGH
+MOD_CONT   <- CONSP_CONT
+MOD_NOTE   <- CONSP_NOTE
+
+add_cells <- function(data, mod_var) {
+  data |>
+    mutate(cgrp   = factor(.data[[mod_var]], levels = 0:1, labels = c("Lo", "Hi")),
+           cell12 = interaction(cgrp, obs, vig, sep = "_", drop = TRUE))
+}
+
+ARM_LAB <- c(C = "Control", F = "Fraud", R = "Fraud + Rebuttal")
+VIG_CONTRASTS <- list(
+  "Fraud vs. Control"            = c(F = 1, C = -1),
+  "Fraud + Rebuttal vs. Control" = c(R = 1, C = -1),
+  "Rebuttal vs. Fraud"           = c(R = 1, F = -1)
+)
+CN_FC <- "Fraud vs. Control"
+CN_RC <- "Fraud + Rebuttal vs. Control"
+CN_RF <- "Rebuttal vs. Fraud"
+CONTRAST_TEX <- c("{Fraud\\\\vs.\\ Control}",
+                  "{Fraud + Rebuttal\\\\vs.\\ Control}",
+                  "{Rebuttal\\\\vs.\\ Fraud}")
+
+## 7b. Prior-belief balance table
+BAL_GROUPS <- list(
+  list(o = "Obs", g = "Hi", lab = "Observers, high prior beliefs"),
+  list(o = "Non", g = "Hi", lab = "Non-observers, high prior beliefs"),
+  list(o = "Obs", g = "Lo", lab = "Observers, low prior beliefs"),
+  list(o = "Non", g = "Lo", lab = "Non-observers, low prior beliefs")
+)
+
+prior_cells <- function(mod_name) {
+  add_cells(df_cit, MODERATORS[[mod_name]]) |>
+    mutate(prior = as.numeric(.data[[MOD_CONT[[mod_name]]]])) |>
+    filter(!is.na(cgrp), !is.na(obs), !is.na(vig), !is.na(prior))
+}
+
+## Standardized difference in the continuous measure, arm a vs. Control
+prior_std_diff <- function(mod_name, o, g, a = "R") {
+  dg <- prior_cells(mod_name) |> filter(obs == o, cgrp == g)
+  x <- dg$prior[dg$vig == a]; xc <- dg$prior[dg$vig == "C"]
+  (mean(x) - mean(xc)) / sqrt((var(x) + var(xc)) / 2)
+}
+
+make_balance_prior_tex <- function(mod_name) {
+  d <- prior_cells(mod_name)
+  lines <- c(
+    "\\begin{tblr}{colspec={lrrrrrrrr}, width=\\linewidth, cells={font=\\footnotesize}, column{1}={halign=l}, column{2-9}={halign=r}}",
+    "\\toprule",
+    "Article & N & Mean & Std. dev. & P25 & Median & P75 & {Std. diff.\\\\vs. Control} & {$p$-value\\\\(equal means)} \\\\",
+    "\\midrule")
+  for (gr in BAL_GROUPS) {
+    dg <- d |> filter(obs == gr$o, cgrp == gr$g)
+    p  <- tryCatch({
+      fs <- summary(lm(prior ~ vig, data = dg))$fstatistic
+      pf(fs[1], fs[2], fs[3], lower.tail = FALSE)
+    }, error = function(e) NA_real_)
+    xc <- dg$prior[dg$vig == "C"]
+    lines <- c(lines, paste0("\\SetCell[c=9]{l}\\textbf{", gr$lab, "}", strrep(" &", 8), " \\\\"))
+    for (a in c("C", "F", "R")) {
+      x   <- dg$prior[dg$vig == a]
+      sd_ <- if (a == "C") "" else fmt_num((mean(x) - mean(xc)) / sqrt((var(x) + var(xc)) / 2))
+      q   <- quantile(x, c(0.25, 0.5, 0.75), names = FALSE)
+      lines <- c(lines, paste0(
+        ARM_LAB[[a]], " & ", length(x), " & ", fmt_num(mean(x)), " & ", fmt_num(sd(x)), " & ",
+        fmt_num(q[1]), " & ", fmt_num(q[2]), " & ", fmt_num(q[3]), " & ", sd_, " & ",
+        if (a == "C") fmt_pval(p) else "", " \\\\"))
+    }
+  }
+  lines <- c(lines, "\\bottomrule", "\\end{tblr}", "", "\\vspace{0.5em}", "",
+             "\\begin{minipage}{\\linewidth}", "\\footnotesize",
+             paste0("\\textit{Note:} ", MOD_NOTE[[mod_name]],
+                    " Statistics describe the continuous prior-belief measure (1--4, higher = ",
+                    "stronger conspiracy belief) within each observation $\\times$ prior-belief ",
+                    "group, by article. Std.\\ diff.: difference from the Control mean divided by ",
+                    "the pooled standard deviation. $p$-value: F-test of equal means across the ",
+                    "three articles within the group."),
+             "\\end{minipage}")
+  paste(lines, collapse = "\n")
+}
+
+## 7c. Specifications
+SPECS <- list(
+  "No covariates"                    = list(x = NULL,               lin = FALSE),
+  "Demographic controls"             = list(x = X_DEMO,             lin = FALSE),
+  "Demographic + prior belief"       = list(x = c(X_DEMO, "PRIOR"), lin = FALSE),
+  "Demographic + prior belief (Lin)" = list(x = c(X_DEMO, "PRIOR"), lin = TRUE)
+)
+SPEC_SETS <- list(main = c("No covariates", "Demographic controls"),
+                  appx = c("Demographic + prior belief", "Demographic + prior belief (Lin)"))
+FE_VAR <- NULL
+
+## 7d. Model and contrast helpers
+fit_cells <- function(var, data, cellvar, x = NULL, lin = FALSE, fe = FE_VAR) {
+  d <- data |> mutate(cell = .data[[cellvar]]) |> filter(!is.na(.data[[var]]), !is.na(cell))
+  if (!is.null(x))  d <- d |> filter(if_all(all_of(x), ~ !is.na(.x)))
+  if (!is.null(fe)) d <- d |> filter(!is.na(.data[[fe]]))
+  d   <- d |> mutate(cell = droplevels(cell))
+  rhs <- "0 + cell"
+  if (!is.null(x)) {
+    d  <- d |> mutate(across(all_of(x), ~ as.numeric(.x) - mean(as.numeric(.x)), .names = "{.col}_c"))
+    xc <- paste0(x, "_c")
+    if (!lin) {
+      rhs <- paste(rhs, "+", paste(xc, collapse = " + "))
+    } else {
+      lin_terms <- character(0)
+      for (cl in levels(d$cell)) {
+        in_cl <- d$cell == cl
+        M     <- cbind(1, as.matrix(d[in_cl, xc, drop = FALSE]))
+        q     <- qr(M)
+        keep  <- setdiff(q$pivot[seq_len(q$rank)], 1) - 1
+        for (v in xc[keep]) {
+          nm <- paste0("lin_", make.names(cl), "__", v)
+          d[[nm]] <- d[[v]] * in_cl
+          lin_terms <- c(lin_terms, nm)
+        }
+      }
+      if (length(lin_terms) > 0) rhs <- paste(rhs, "+", paste(lin_terms, collapse = " + "))
+    }
+  }
+  if (!is.null(fe)) rhs <- paste0(rhs, " + factor(", fe, ")")
+  lm_robust(as.formula(paste(var, "~", rhs)), data = d, se_type = "HC2")
+}
+
+lin_comb <- function(m, w) {
+  b <- coef(m); b <- b[!is.na(b)]
+  V <- vcov(m)[names(b), names(b)]
+  stopifnot(all(names(w) %in% names(b)))
+  L <- setNames(numeric(length(b)), names(b)); L[names(w)] <- w
+  est <- sum(L * b); se <- sqrt(drop(t(L) %*% V %*% L)); dfr <- unname(m$df[1])
+  tibble(estimate = est, std.error = se,
+         conf.low = est - qt(0.975, dfr) * se, conf.high = est + qt(0.975, dfr) * se,
+         p.value = 2 * pt(abs(est / se), dfr, lower.tail = FALSE))
+}
+
+cname  <- function(ob, vig, cg = NULL) paste0("cell", if (!is.null(cg)) paste0(cg, "_"), ob, "_", vig)
+w_cell <- function(vw, ob, cg = NULL) setNames(unname(vw), cname(ob, names(vw), cg))
+w_all  <- function(vw) setNames(unname(vw), paste0("cell", names(vw)))
+
+LV_OBS  <- "Observers"
+LV_NON  <- "Non-observers"
+LV_DIFF <- "Obs. - Non-obs."
+LV_ALL  <- "All respondents"
+
+run_contrasts <- function(m, by_cons = TRUE) {
+  cg_levels <- if (by_cons) c("Hi", "Lo") else list(NULL)
+  out <- list()
+  add <- function(w, ...) out[[length(out) + 1]] <<- lin_comb(m, w) |> mutate(...)
+  for (cn in names(VIG_CONTRASTS)) {
+    vw <- VIG_CONTRASTS[[cn]]
+    for (cg in cg_levels) {
+      wo <- w_cell(vw, "Obs", cg); wn <- w_cell(vw, "Non", cg)
+      grp <- if (is.null(cg)) "All" else cg
+      add(wo,         contrast = cn, group = grp, level = LV_OBS)
+      add(wn,         contrast = cn, group = grp, level = LV_NON)
+      add(c(wo, -wn), contrast = cn, group = grp, level = LV_DIFF)
+    }
+    if (by_cons) {
+      add(c(w_cell(vw, "Obs", "Hi"), -w_cell(vw, "Obs", "Lo")),
+          contrast = cn, group = "Hi - Lo", level = LV_OBS)
+      add(c(w_cell(vw, "Obs", "Hi"), -w_cell(vw, "Non", "Hi"),
+            -w_cell(vw, "Obs", "Lo"),  w_cell(vw, "Non", "Lo")),
+          contrast = cn, group = "Hi - Lo", level = LV_DIFF)
+    }
+  }
+  bind_rows(out)
+}
+
+run_overall <- function(m) {
+  bind_rows(lapply(names(VIG_CONTRASTS), function(cn)
+    lin_comb(m, w_all(VIG_CONTRASTS[[cn]])) |>
+      mutate(contrast = cn, group = "All", level = LV_ALL)))
+}
+
+assign_panel <- function(res) {
+  res |>
+    mutate(panel = case_when(
+      group %in% c("Hi", "Lo") & level %in% c(LV_OBS, LV_NON) ~ "A",
+      group %in% c("Hi", "Lo") & level == LV_DIFF             ~ "B",
+      group == "Hi - Lo"       & level == LV_DIFF             ~ "C",
+      group == "All"                                          ~ "D",
+      TRUE                                                    ~ NA_character_))
+}
+
+## 7e. Estimate (all six measures, so the item-count robustness figure works)
+res_all <- list()
+for (mod_name in names(MODERATORS)) {
+  d_mod <- add_cells(df_cit, MODERATORS[[mod_name]])
+  for (VAR in c("Q119", "Q122")) {
+    for (spec_name in names(SPECS)) {
+      x <- SPECS[[spec_name]]$x; lin <- SPECS[[spec_name]]$lin
+      if (!is.null(x)) x[x == "PRIOR"] <- MOD_CONT[[mod_name]]
+      m12 <- fit_cells(VAR, d_mod, "cell12", x, lin)
+      m6  <- fit_cells(VAR, d_mod, "cell6",  x, lin)
+      m3  <- fit_cells(VAR, d_mod, "cell3",  x, lin)
+      res_all[[length(res_all) + 1]] <- bind_rows(
+        run_contrasts(m12, by_cons = TRUE)  |> mutate(n = m12$nobs),
+        run_contrasts(m6,  by_cons = FALSE) |> mutate(n = m6$nobs),
+        run_overall(m3)                     |> mutate(n = m3$nobs)
+      ) |> mutate(moderator = mod_name, outcome = VAR, spec = spec_name)
+    }
+  }
+}
+res_all <- bind_rows(res_all) |>
+  assign_panel() |>
+  group_by(moderator, outcome, spec, panel) |>
+  mutate(p.holm = ifelse(is.na(panel), NA_real_, p.adjust(p.value, method = "holm"))) |>
+  ungroup()
+
+## 7f. LaTeX tables
+star_tex <- function(p) {
+  s <- ifelse(p < 0.01, "***", ifelse(p < 0.05, "**", ifelse(p < 0.1, "*", "")))
+  ifelse(s == "", "", paste0("$^{", s, "}$"))
+}
+tex_row <- function(label, vals) paste0(paste(c(label, vals), collapse = " & "), " \\\\")
+
+MT_ROWS <- list(
+  list(g = "Hi", l = LV_OBS,  lab = "Observers, high prior beliefs"),
+  list(g = "Hi", l = LV_NON,  lab = "Non-observers, high prior beliefs"),
+  list(g = "Hi", l = LV_DIFF, lab = "Difference between observers and non-observers: high prior beliefs"),
+  list(g = "Lo", l = LV_OBS,  lab = "Observers, low prior beliefs"),
+  list(g = "Lo", l = LV_NON,  lab = "Non-observers, low prior beliefs"),
+  list(g = "Lo", l = LV_DIFF, lab = "Difference between observers and non-observers: low prior beliefs")
+)
+
+make_main_text_tex <- function(res, var, mod = "main", cn = CN_RC, spec = "No covariates") {
+  d <- res |> filter(moderator == mod, outcome == var, contrast == cn, spec == !!spec)
+  lines <- c(
+    "\\begin{tblr}{colspec={X[l]rrcr}, width=\\linewidth, column{2-5}={halign=c}}",
+    "\\toprule",
+    "& Estimate & Std. error & 95\\% CI & $p$-value \\\\",
+    "\\midrule")
+  for (r in MT_ROWS) {
+    x <- d |> filter(group == r$g, level == r$l)
+    lines <- c(lines, tex_row(r$lab, c(
+      paste0(sprintf("%.3f", x$estimate), star_tex(x$p.value)),
+      sprintf("%.3f", x$std.error),
+      sprintf("[%.3f, %.3f]", x$conf.low, x$conf.high),
+      sprintf("%.3f", x$p.value))))
+  }
+  n <- d |> filter(group == "Hi", level == LV_OBS) |> pull(n)
+  lines <- c(lines, "\\midrule", tex_row("N", c(as.character(n), "", "", "")),
+             "\\bottomrule", "\\end{tblr}", "", "\\vspace{0.5em}", "",
+             "\\begin{minipage}{\\linewidth}", "\\footnotesize",
+             paste0("\\textit{Note:} Entries are differences in mean ", tolower(VAR_LABELS[[var]]),
+                    " between the fraud + rebuttal article and the control article, from a ",
+                    "saturated OLS model with one mean per prior belief $\\times$ observation ",
+                    "$\\times$ article cell, without covariates. ", MOD_NOTE[[mod]],
+                    " HC2 robust standard errors. $^{*}p<0.1$, $^{**}p<0.05$, $^{***}p<0.01$."),
+             "\\end{minipage}")
+  paste(lines, collapse = "\n")
+}
+
+SI_PANELS <- list(
+  list(p = "A", lab = "Panel A. Effects within groups", rows = list(
+    list(g = "Hi", l = LV_OBS, lab = "Observers, high prior beliefs"),
+    list(g = "Hi", l = LV_NON, lab = "Non-observers, high prior beliefs"),
+    list(g = "Lo", l = LV_OBS, lab = "Observers, low prior beliefs"),
+    list(g = "Lo", l = LV_NON, lab = "Non-observers, low prior beliefs"))),
+  list(p = "B", lab = "Panel B. Differences between observers and non-observers", rows = list(
+    list(g = "Hi", l = LV_DIFF, lab = "High prior beliefs"),
+    list(g = "Lo", l = LV_DIFF, lab = "Low prior beliefs"))),
+  list(p = "C", lab = "Panel C. Differences in the observer--non-observer contrast by prior beliefs", rows = list(
+    list(g = "Hi - Lo", l = LV_DIFF, lab = "High minus low prior beliefs"))),
+  list(p = "D", lab = "Panel D. Results without splitting by prior beliefs", rows = list(
+    list(g = "All", l = LV_ALL,  lab = "All respondents"),
+    list(g = "All", l = LV_OBS,  lab = "Observers"),
+    list(g = "All", l = LV_NON,  lab = "Non-observers"),
+    list(g = "All", l = LV_DIFF, lab = "Difference (observers $-$ non-observers)")))
+)
+
+make_si_tex <- function(res, var, specs, measure_note = "") {
+  d  <- res |> filter(outcome == var, spec %in% specs)
+  S  <- length(specs); nc <- 1 + 3 * S
+  cols <- expand.grid(contrast = names(VIG_CONTRASTS), spec = specs, stringsAsFactors = FALSE)
+  get_vals <- function(g, l, what) {
+    vapply(seq_len(nrow(cols)), function(j) {
+      r <- d |> filter(group == g, level == l, contrast == cols$contrast[j], spec == cols$spec[j])
+      if (nrow(r) != 1) return("")
+      switch(what,
+             est  = paste0(sprintf("%.3f", r$estimate), star_tex(r$p.value)),
+             se   = sprintf("(%.3f)", r$std.error),
+             holm = if (is.na(r$p.holm)) "" else sprintf("[%.3f]", r$p.holm),
+             n    = as.character(r$n))
+    }, character(1))
+  }
+  spec_hdr <- paste0("& ", paste0("\\SetCell[c=3]{c} ", specs, " & &", collapse = " & "), " \\\\")
+  cmid <- paste(sprintf("\\cmidrule[lr]{%d-%d}", 2 + 3 * (0:(S - 1)), 4 + 3 * (0:(S - 1))), collapse = " ")
+  lines <- c(
+    paste0("\\begin{tblr}{colspec={X[l]", strrep("c", 3 * S), "}, width=\\linewidth, ",
+           "rowsep=1pt, cells={font=\\footnotesize}, column{2-", nc, "}={halign=c}}"),
+    "\\toprule", spec_hdr, cmid, tex_row("", rep(CONTRAST_TEX, S)), "\\midrule")
+  for (p in SI_PANELS) {
+    lines <- c(lines, paste0("\\SetCell[c=", nc, "]{l}\\textbf{", p$lab, "}", strrep(" &", nc - 1), " \\\\"))
+    for (r in p$rows) {
+      lines <- c(lines, tex_row(r$lab, get_vals(r$g, r$l, "est")),
+                 tex_row("", get_vals(r$g, r$l, "se")),
+                 tex_row("", get_vals(r$g, r$l, "holm")))
+    }
+  }
+  lines <- c(lines, "\\midrule",
+             tex_row("N (Panels A--C)", get_vals("Hi", LV_OBS, "n")),
+             tex_row("N (Panel D)",     get_vals("All", LV_OBS, "n")),
+             "\\bottomrule", "\\end{tblr}", "", "\\vspace{0.5em}", "",
+             "\\begin{minipage}{\\linewidth}", "\\footnotesize",
+             paste0("\\textit{Note:} ", measure_note, " Entries are differences in cell means from ",
+                    "saturated OLS models with one mean per prior belief $\\times$ observation $\\times$ ",
+                    "article cell (Panels A--C) or per observation $\\times$ article cell and per article ",
+                    "(Panel D). Fraud: fraud-claims article; Fraud + Rebuttal: fraud claims with the ",
+                    "official rebuttal; Control: no allegation. Panel C reports the triple difference: ",
+                    "the observer--non-observer difference among high prior believers minus the same ",
+                    "difference among low prior believers. Demographic controls: gender, age, marital ",
+                    "status, and education (centered). Prior belief: the continuous version of the same ",
+                    "measure (centered); Lin: covariates interacted with every cell (Lin 2013). ",
+                    "HC2 robust standard errors in parentheses. ",
+                    "Holm-adjusted $p$-values in brackets, adjusting across all rows and comparisons ",
+                    "within each panel and specification. $^{*}p<0.1$, $^{**}p<0.05$, $^{***}p<0.01$ (unadjusted)."),
+             "\\end{minipage}")
+  paste(lines, collapse = "\n")
+}
+
+## Key-estimates table (first page and each robustness section)
+KEY_ROWS <- list(
+  list(panel = "Panel A. Allegation + rebuttal vs. control (focal question)"),
+  list(cn = CN_RC, g = "Hi", l = LV_OBS,  lab = "$\\tau_{2C}(1,1)$: observers, high belief"),
+  list(cn = CN_RC, g = "Hi", l = LV_NON,  lab = "$\\tau_{2C}(0,1)$: non-observers, high belief"),
+  list(cn = CN_RC, g = "Hi", l = LV_DIFF, lab = "$\\Delta_{2C}(1)$: obs. $-$ non-obs., high belief"),
+  list(cn = CN_RC, g = "Lo", l = LV_DIFF, lab = "$\\Delta_{2C}(0)$: obs. $-$ non-obs., low belief"),
+  list(cn = CN_RC, g = "Hi - Lo", l = LV_DIFF, lab = "$\\Omega_{2C} = \\delta_2$: high $-$ low"),
+  list(panel = "Panel B. Rebuttal vs. fraud (separate question)"),
+  list(cn = CN_RF, g = "Hi", l = LV_DIFF, lab = "$\\Delta_{21}(1)$: obs. $-$ non-obs., high belief"),
+  list(cn = CN_RF, g = "Lo", l = LV_DIFF, lab = "$\\Delta_{21}(0)$: obs. $-$ non-obs., low belief"),
+  list(cn = CN_RF, g = "Hi - Lo", l = LV_DIFF, lab = "$\\Omega_{21} = \\delta_2 - \\delta_1$: high $-$ low")
+)
+KEY_HDR <- c("{No\\\\covariates}", "{Demographic\\\\controls}",
+             "{Demographic +\\\\prior belief}", "{Demographic +\\\\prior belief (Lin)}")
+
+make_key_tex <- function(mod = "main", var = "Q119") {
+  d <- res_all |> filter(moderator == mod, outcome == var)
+  specs <- names(SPECS)
+  cell <- function(r, what) vapply(specs, function(s) {
+    x <- d |> filter(contrast == r$cn, group == r$g, level == r$l, spec == s)
+    if (nrow(x) != 1) return("")
+    if (what == "est") paste0(sprintf("%.3f", x$estimate), star_tex(x$p.value))
+    else sprintf("(%.3f)", x$std.error)
+  }, character(1))
+  lines <- c("\\begin{tblr}{colspec={X[l]cccc}, width=\\linewidth, rowsep=1pt, cells={font=\\footnotesize}, column{2-5}={halign=c}}",
+             "\\toprule", tex_row("", KEY_HDR), "\\midrule")
+  for (r in KEY_ROWS) {
+    if (!is.null(r$panel)) {
+      lines <- c(lines, paste0("\\SetCell[c=5]{l}\\textbf{", r$panel, "} & & & & \\\\"))
+    } else {
+      lines <- c(lines, tex_row(r$lab, cell(r, "est")), tex_row("", cell(r, "se")))
+    }
+  }
+  n <- d |> filter(contrast == CN_RC, group == "Hi", level == LV_OBS) |>
+    arrange(match(spec, specs)) |> pull(n)
+  lines <- c(lines, "\\midrule", tex_row("N", as.character(n)), "\\bottomrule", "\\end{tblr}",
+             "", "\\vspace{0.5em}", "", "\\begin{minipage}{\\linewidth}", "\\footnotesize",
+             paste0("\\textit{Note:} Outcome: ", tolower(VAR_LABELS[[var]]), " (", var,
+                    ", five-point scale). ", MOD_NOTE[[mod]],
+                    " Entries are linear combinations of cell means from the saturated model ",
+                    "(equivalent to the fully interacted model in the Empirical Strategy). ",
+                    "$\\tau$: effect within a group; $\\Delta$: observers minus non-observers; ",
+                    "$\\Omega$: $\\Delta$ for high minus $\\Delta$ for low prior belief. ",
+                    "Columns 3--4 add the continuous version of the same prior-belief measure ",
+                    "(additively, or interacted with every cell as in Lin 2013). ",
+                    "HC2 robust standard errors in parentheses. ",
+                    "$^{*}p<0.1$, $^{**}p<0.05$, $^{***}p<0.01$ (unadjusted)."),
+             "\\end{minipage}")
+  paste(lines, collapse = "\n")
+}
+
+## 7g. Contrast figures
+fig_theme <- theme_classic(base_size = 15) +
+  theme(legend.position = "bottom", strip.background = element_blank(),
+        strip.text = element_text(face = "bold"))
+
+prep_fig <- function(d, specs) {
+  d |> filter(spec %in% specs) |>
+    mutate(contrast = factor(contrast, levels = names(VIG_CONTRASTS)),
+           spec     = factor(spec, levels = specs))
+}
+
+plot_overall <- function(res, var, specs, by_obs = FALSE) {
+  d <- res |>
+    filter(outcome == var, group == "All",
+           level %in% (if (by_obs) c(LV_OBS, LV_NON) else LV_ALL)) |>
+    prep_fig(specs) |>
+    mutate(level = factor(level, levels = c(LV_ALL, LV_OBS, LV_NON)))
+  p <- ggplot(d, aes(x = estimate, y = spec, color = spec, xmin = conf.low, xmax = conf.high)) +
+    geom_pointrange(size = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    scale_y_discrete(limits = rev(specs)) +
+    labs(x = "Difference in means (5-point scale)", y = NULL, color = "Model",
+         caption = str_wrap(out_caption(var), width = 90)) +
+    fig_theme + theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+  if (by_obs) p + facet_grid(level ~ contrast) else p + facet_wrap(~ contrast, nrow = 1)
+}
+
+plot_contrasts <- function(res, var, specs, lo_lab = "Low prior belief", hi_lab = "High prior belief") {
+  d <- res |>
+    filter(outcome == var, group %in% c("Hi", "Lo"), level %in% c(LV_OBS, LV_NON)) |>
+    prep_fig(specs) |>
+    mutate(group = factor(group, levels = c("Lo", "Hi"), labels = c(lo_lab, hi_lab)),
+           level = factor(level, levels = c(LV_OBS, LV_NON)))
+  ggplot(d, aes(x = estimate, y = group, color = spec, xmin = conf.low, xmax = conf.high)) +
+    geom_pointrange(position = position_dodge(width = -0.5), size = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    facet_grid(level ~ contrast) +
+    labs(x = "Difference in means (5-point scale)", y = NULL, color = "Model",
+         caption = str_wrap(out_caption(var), width = 90)) +
+    fig_theme
+}
+
+## 7h. Robustness: other moderators, and the prior-belief split standardized
+## to party and fairness composition (now for each reported measure)
+ALT_MODS <- list(
+  ppp  = list(var = "ppp_id",        lo = "Non-PPP",                hi = "PPP identifiers/leaners"),
+  fair = list(var = "fairness_high", lo = "Low perceived fairness", hi = "High perceived fairness")
+)
+STD_SPECS <- list(
+  "No covariates (same sample)"    = list(x = NULL, lin = FALSE),
+  "Standardized: party + fairness" = list(x = c("ppp_id", "fairness_high"), lin = TRUE)
+)
+
+res_other <- list()
+for (am in names(ALT_MODS)) {
+  d_m <- add_cells(df_cit, ALT_MODS[[am]]$var)
+  for (VAR in c("Q119", "Q122")) {
+    for (spec_name in SPEC_SETS$main) {
+      m12 <- fit_cells(VAR, d_m, "cell12", SPECS[[spec_name]]$x, lin = FALSE)
+      res_other[[length(res_other) + 1]] <- run_contrasts(m12, by_cons = TRUE) |>
+        mutate(n = m12$nobs, moderator = am, outcome = VAR, spec = spec_name)
+    }
+  }
+}
+for (mod_name in names(REPORT_MODS)) {
+  d_s <- add_cells(df_cit, MODERATORS[[mod_name]]) |>
+    filter(!is.na(ppp_id), !is.na(fairness_high))
+  for (VAR in c("Q119", "Q122")) {
+    for (spec_name in names(STD_SPECS)) {
+      m12 <- fit_cells(VAR, d_s, "cell12", STD_SPECS[[spec_name]]$x, lin = STD_SPECS[[spec_name]]$lin)
+      res_other[[length(res_other) + 1]] <- run_contrasts(m12, by_cons = TRUE) |>
+        mutate(n = m12$nobs, moderator = paste0("prior_std_", mod_name), outcome = VAR, spec = spec_name)
+    }
+  }
+}
+res_other <- bind_rows(res_other)
+
+## 7i. Robustness: number of items
+ROB_SPECS    <- SPEC_SETS$main
+ROB_CONTRAST <- CN_RC
+ROB_EST <- c("Observers, high prior beliefs", "Observers minus non-observers, high prior beliefs")
+ROB_MEAS_LAB <- sapply(CONSP_ORDER, function(k) {
+  n_it <- length(CONSP_ITEMS[[k]])
+  paste0(n_it, if (n_it == 1) " item" else " items", if (k == "main") " (main)" else "")
+})
+ROB_MEAS_LEVELS <- ROB_MEAS_LAB[order(sapply(CONSP_ITEMS[CONSP_ORDER], length))]
+rob <- res_all |>
+  filter(contrast == ROB_CONTRAST, group == "Hi", level %in% c(LV_OBS, LV_DIFF), spec %in% ROB_SPECS) |>
+  mutate(estimand = factor(ifelse(level == LV_OBS, ROB_EST[1], ROB_EST[2]), levels = ROB_EST),
+         measure  = factor(ROB_MEAS_LAB[moderator], levels = ROB_MEAS_LEVELS),
+         spec     = factor(spec, levels = ROB_SPECS))
+
+plot_robust_items <- function(var) {
+  ggplot(rob |> filter(outcome == var),
+         aes(x = estimate, y = measure, color = spec, xmin = conf.low, xmax = conf.high)) +
+    geom_pointrange(position = position_dodge(width = -0.5), size = 0.5) +
+    geom_vline(xintercept = 0, linetype = "dashed", color = "gray50") +
+    facet_wrap(~ estimand, nrow = 1) +
+    labs(x = paste0("Difference in means (5-point scale): ", ROB_CONTRAST),
+         y = "Prior-belief measure", color = "Model",
+         caption = str_wrap(paste0(
+           "Each row splits respondents at the citizen-sample median of a prior-belief ",
+           "measure built from 1 to 6 Q18 items (items added in order of relevance). ",
+           out_caption(var)), width = 100)) +
+    fig_theme
+}
+```
+
+```{r interflex_run, include = FALSE}
+# =============================================================================
+# 8. CONTINUOUS MODERATOR: INTERFLEX (production Section 8), for each measure
+# =============================================================================
+IF_SPECS <- setNames(COV_SETS, COV_LAB[names(COV_SETS)])
+IF_JOBS  <- list(
+  list(base = "C", keep = c(F = CN_FC, R = CN_RC)),
+  list(base = "F", keep = c(R = CN_RF))
+)
+if_bins <- function(mod) list(
+  terciles = list(nbins = 3, cutoffs = NULL),
+  median   = list(nbins = 2, cutoffs = CONSP_MED[[mod]])
+)
+
+if_data <- function(var, obs_lv, z, xvar) {
+  df_cit |>
+    filter(obs == obs_lv) |>
+    mutate(vig_chr = as.character(vig)) |>
+    select(all_of(c(var, "vig_chr", xvar, z))) |>
+    mutate(across(-vig_chr, ~ as.numeric(.x))) |>
+    as.data.frame() |>
+    na.omit()
+}
+
+run_if <- function(var, obs_lv, z, base, bins, xvar) {
+  interflex(
+    estimator = "binning", data = if_data(var, obs_lv, z, xvar),
+    Y = var, D = "vig_chr", X = xvar, Z = z,
+    treat.type = "discrete", base = base,
+    nbins = bins$nbins, cutoffs = bins$cutoffs,
+    vartype = "delta", vcov.type = "robust",
+    wald = TRUE, parallel = FALSE, figure = TRUE, Xdistr = "histogram",
+    Xlabel = "Prior conspiracy belief", Ylabel = out_label(var), Dlabel = "Vignette")
+}
+
+pull_est <- function(lst, arms) {
+  lapply(arms, function(tr) {
+    e <- as.data.frame(lst[[tr]])[, 1:5]
+    names(e) <- c("x", "estimate", "std.error", "conf.low", "conf.high")
+    e$treat <- tr
+    e
+  }) |> bind_rows()
+}
+num1 <- function(x) { x <- suppressWarnings(as.numeric(x)); if (length(x) == 0) NA_real_ else x[1] }
+
+if_lin <- list(); if_bin <- list(); if_wald <- list(); if_fail <- character(0)
+for (mod in names(REPORT_MODS)) {
+  xvar <- CONSP_CONT[[mod]]; BINS <- if_bins(mod)
+  for (spec_name in names(IF_SPECS)) {
+    for (VAR in c("Q119", "Q122")) {
+      for (bin_name in names(BINS)) {
+        for (pp in c("Obs", "Non")) {
+          for (job in IF_JOBS) {
+            out <- NULL
+            invisible(capture.output(
+              out <- tryCatch(
+                run_if(VAR, pp, IF_SPECS[[spec_name]], job$base, BINS[[bin_name]], xvar),
+                error = function(e) {
+                  if_fail <<- c(if_fail, paste(mod, VAR, spec_name, bin_name, pp, job$base,
+                                               conditionMessage(e), sep = " | "))
+                  NULL
+                })
+            ))
+            if (is.null(out)) next
+            arms <- names(job$keep)
+            tag  <- function(d) d |>
+              mutate(contrast = unname(job$keep[treat]), outcome = VAR, spec = spec_name,
+                     bins = bin_name, obs = pp, mod = mod)
+            if (bin_name == "terciles" || is.null(out$est.lin) == FALSE &&
+                !any(sapply(if_lin, function(z) any(z$mod == mod & z$outcome == VAR &
+                       z$spec == spec_name & z$obs == pp & z$treat %in% arms)))) {
+              if_lin[[length(if_lin) + 1]] <- tag(pull_est(out$est.lin, arms))
+            }
+            if_bin[[length(if_bin) + 1]] <- tag(pull_est(out$est.bin, arms))
+            for (tr in arms) {
+              if_wald[[length(if_wald) + 1]] <- tibble(
+                mod = mod, outcome = VAR, spec = spec_name, bins = bin_name, obs = pp,
+                contrast = unname(job$keep[tr]),
+                p_wald_arm   = num1(out$tests$sub.test[[tr]]$p.wald),
+                p_wald_joint = num1(out$tests$p.wald),
+                n = nrow(if_data(VAR, pp, IF_SPECS[[spec_name]], xvar)))
+            }
+          }
+        }
+      }
+    }
+  }
+}
+if_lin  <- bind_rows(if_lin)
+if_bin  <- bind_rows(if_bin)
+if_wald <- bind_rows(if_wald)
+
+## Combined figure: linear estimator (line), binned estimates (points),
+## and the moderator distribution of the two articles compared (bottom)
+HIST_BREAKS <- seq(1, 4, by = 0.125)
+HIST_SHARE  <- 0.25
+
+hist_data <- function(var, spec_name, mod) {
+  xvar <- CONSP_CONT[[mod]]; out <- list()
+  for (pp in c("Obs", "Non")) {
+    d <- if_data(var, pp, IF_SPECS[[spec_name]], xvar)
+    for (cn in names(VIG_CONTRASTS)) {
+      vw   <- VIG_CONTRASTS[[cn]]
+      arms <- c(ref = names(vw)[vw < 0], cmp = names(vw)[vw > 0])
+      for (a in names(arms)) {
+        x   <- d[[xvar]][d$vig_chr == arms[[a]]]
+        bin <- cut(x, HIST_BREAKS, include.lowest = TRUE, labels = FALSE)
+        out[[length(out) + 1]] <- tibble(
+          obs = pp, contrast = cn, arm = a,
+          xmin = head(HIST_BREAKS, -1), xmax = tail(HIST_BREAKS, -1),
+          count = tabulate(bin, nbins = length(HIST_BREAKS) - 1))
+      }
+    }
+  }
+  bind_rows(out)
+}
+
+plot_if <- function(var, spec_name, bin_name, mod = "main") {
+  fix <- function(d) d |>
+    mutate(obs = factor(obs, levels = c("Obs", "Non"), labels = c("Observers", "Non-observers")),
+           contrast = factor(contrast, levels = names(VIG_CONTRASTS)))
+  L <- if_lin |> filter(mod == !!mod, outcome == var, spec == spec_name) |> fix()
+  B <- if_bin |> filter(mod == !!mod, outcome == var, spec == spec_name, bins == bin_name) |> fix()
+  if (nrow(B) == 0) stop("no binned estimates for this specification")
+  yr   <- range(c(L$conf.low, L$conf.high, B$conf.low, B$conf.high, 0), na.rm = TRUE)
+  span <- diff(yr); hgt <- HIST_SHARE * span; y0 <- yr[1] - hgt - 0.05 * span
+  H <- hist_data(var, spec_name, mod) |>
+    group_by(obs, contrast, xmin) |>
+    mutate(ref_n = sum(count[arm == "ref"])) |>
+    ungroup() |>
+    mutate(lo = ifelse(arm == "ref", 0, ref_n), hi = lo + count)
+  max_tot <- max(H$hi)
+  H <- H |> filter(count > 0) |>
+    mutate(ymin = y0 + hgt * lo / max_tot, ymax = y0 + hgt * hi / max_tot) |> fix()
+  ggplot() +
+    geom_rect(data = H, aes(xmin = xmin, xmax = xmax, ymin = ymin, ymax = ymax, fill = arm),
+              color = "white", linewidth = 0.1) +
+    scale_fill_manual(values = c(ref = "gray80", cmp = "gray45"), breaks = c("ref", "cmp"),
+                      labels = c(ref = "Reference vignette", cmp = "Compared vignette"),
+                      name = "Moderator distribution") +
+    geom_ribbon(data = L, aes(x = x, ymin = conf.low, ymax = conf.high), fill = "gray70", alpha = 0.4) +
+    geom_line(data = L, aes(x = x, y = estimate), linewidth = 0.8) +
+    geom_pointrange(data = B, aes(x = x, y = estimate, ymin = conf.low, ymax = conf.high),
+                    color = "#C00000", size = 0.5) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "gray50") +
+    geom_vline(xintercept = CONSP_MED[[mod]], linetype = "dotted") +
+    facet_grid(obs ~ contrast) +
+    labs(x = paste0("Prior conspiracy belief: ", REPORT_MODS[[mod]],
+                    " (1-4; dotted line = citizen median)"),
+         y = "Conditional effect", title = paste0(spec_name, " | bins: ", bin_name),
+         caption = str_wrap(paste0(
+           "Line and band: linear interaction estimator with 95% CI. ",
+           "Points: binning estimator at bin medians. ",
+           "Bottom: distribution of the moderator in the two vignette groups ",
+           "being compared (stacked). ", out_caption(var)), width = 100)) +
+    theme_classic(base_size = 14) +
+    theme(strip.background = element_blank(), strip.text = element_text(face = "bold"),
+          plot.title = element_text(face = "bold"), legend.position = "bottom")
+}
+
+wald_tex <- function(mod, bn) {
+  d <- if_wald |> filter(mod == !!mod, bins == bn) |>
+    mutate(obs = ifelse(obs == "Obs", "Observers", "Non-observers"),
+           p_wald_arm = fmt_pval(p_wald_arm), p_wald_joint = fmt_pval(p_wald_joint)) |>
+    select(Outcome = outcome, Specification = spec, Group = obs,
+           Comparison = contrast, `Wald p (arm)` = p_wald_arm,
+           `Wald p (joint)` = p_wald_joint, N = n)
+  knitr::kable(d, format = "latex", booktabs = TRUE, linesep = "")
+}
+
+## 8c. Diagnostic: interflex binned estimates vs. differences in means (main)
+chk_bin <- function(var, obs_lv, hi, arms) {
+  d      <- if_data(var, obs_lv, NULL, "conspiracy_belief")
+  in_bin <- if (hi) d$conspiracy_belief > med_6 else d$conspiracy_belief <= med_6
+  x0     <- median(d$conspiracy_belief[in_bin])
+  b      <- d[in_bin & d$vig_chr %in% arms, ]
+  b$D    <- as.integer(b$vig_chr == arms[[1]])
+  b$Xc   <- b$conspiracy_belief - x0
+  m      <- lm(as.formula(paste(var, "~ D * Xc")), data = b)
+  tibble(outcome = var, obs = obs_lv, group = if (hi) "Hi" else "Lo",
+         contrast = names(VIG_CONTRASTS)[sapply(VIG_CONTRASTS, function(v)
+           identical(names(v)[v > 0], arms[[1]]) && identical(names(v)[v < 0], arms[[2]]))],
+         diff_in_means = mean(b[[var]][b$D == 1]) - mean(b[[var]][b$D == 0]),
+         local_linear_at_x0 = unname(coef(m)["D"]))
+}
+diag_tbl <- bind_rows(lapply(c("Q119", "Q122"), function(VAR)
+  bind_rows(lapply(c("Obs", "Non"), function(pp)
+    bind_rows(lapply(c(TRUE, FALSE), function(hi)
+      bind_rows(lapply(list(c("F", "C"), c("R", "C"), c("R", "F")), function(a)
+        chk_bin(VAR, pp, hi, a)))))))))
+s7 <- res_all |>
+  filter(moderator == "main", spec == "No covariates", group %in% c("Hi", "Lo"),
+         level %in% c(LV_OBS, LV_NON)) |>
+  mutate(obs = ifelse(level == LV_OBS, "Obs", "Non")) |>
+  select(outcome, obs, group, contrast, section7 = estimate)
+ifx <- if_bin |>
+  filter(mod == "main", spec == "No covariates", bins == "median") |>
+  mutate(group = ifelse(x > med_6, "Hi", "Lo")) |>
+  select(outcome, obs, group, contrast, interflex = estimate)
+compare_tbl <- diag_tbl |>
+  left_join(s7,  by = c("outcome", "obs", "group", "contrast")) |>
+  left_join(ifx, by = c("outcome", "obs", "group", "contrast")) |>
+  select(outcome, obs, group, contrast, diff_in_means, section7, local_linear_at_x0, interflex) |>
+  mutate(across(where(is.numeric), ~ round(.x, 3)))
+```
+
+```{r inline_helpers, include = FALSE}
+## Numbers quoted in the text ---------------------------------------------------
+est_row <- function(mod = "main", var = "Q119", spec = "No covariates",
+                    cn = CN_RC, g = "Hi", l = LV_DIFF, res = res_all) {
+  r <- res |> filter(moderator == mod, outcome == var, .data$spec == .env$spec,
+                     contrast == cn, group == g, level == l)
+  stopifnot(nrow(r) == 1)
+  r
+}
+num   <- function(x, d = 2) paste0("$", sprintf(paste0("%.", d, "f"), x), "$")
+p_txt <- function(p) if (p < 0.001) "$p < 0.001$" else paste0("$p = ", sprintf("%.3f", p), "$")
+ci_txt <- function(r) sprintf("$[%.2f, %.2f]$", r$conf.low, r$conf.high)
+fe    <- function(r) paste0(num(r$estimate), " (SE ", sprintf("%.2f", r$std.error), ", ", p_txt(r$p.value), ")")
+fe_ci <- function(r) paste0(num(r$estimate), " (95\\% CI ", ci_txt(r), "; ", p_txt(r$p.value), ")")
+dirw  <- function(x, neg = "lower", pos = "higher") if (x < 0) neg else pos
+
+## Key numbers (6-item index, Q119)
+k_focal   <- est_row()
+k_focal_d <- est_row(spec = "Demographic controls")
+k_focal_p <- est_row(spec = "Demographic + prior belief")
+k_focal_l <- est_row(spec = "Demographic + prior belief (Lin)")
+k_low     <- est_row(g = "Lo")
+k_omega   <- est_row(g = "Hi - Lo")
+k_obs_hi  <- est_row(l = LV_OBS)
+k_non_hi  <- est_row(l = LV_NON)
+k_rf      <- est_row(cn = CN_RF)
+k_rf_om   <- est_row(cn = CN_RF, g = "Hi - Lo")
+
+## Measure descriptives
+meas_tbl <- tibble(
+  mod = names(REPORT_MODS),
+  Measure = unname(REPORT_MODS),
+  Items = sapply(names(REPORT_MODS), function(k) paste(CONSP_ITEMS[[k]], collapse = ", ")),
+  Cutoff = unname(CONSP_MED[names(REPORT_MODS)]),
+  `Share above median` = sapply(names(REPORT_MODS), function(k) mean(df_cit[[CONSP_HIGH[[k]]]], na.rm = TRUE)),
+  `N (valid)` = sapply(names(REPORT_MODS), function(k) sum(!is.na(df_cit[[CONSP_HIGH[[k]]]]))),
+  `Same group as 6-item split` = sapply(names(REPORT_MODS), function(k)
+    mean(df_cit[[CONSP_HIGH[[k]]]] == df_cit$conspiracy_high, na.rm = TRUE))
+)
+```
+
+\thispagestyle{empty}
+
+# Key Takeaway {-}
+
+**Research question.** Does firsthand observation change how citizens respond to competing claims about electoral integrity?
+
+**In one sentence.** Exploratory evidence suggests that firsthand observation shifts how citizens with stronger prior conspiracy beliefs respond to a news report pairing a fraud allegation with an official rebuttal, toward lower perceived fraud or procedural problems.
+
+**In one paragraph.** Among citizens with above-median prior conspiracy beliefs, the effect of an allegation-plus-rebuttal article relative to an incident-only control is `r sprintf("%.2f", abs(k_focal$estimate))` points `r dirw(k_focal$estimate, "more negative", "more positive")` among observers than non-observers on a five-point scale (95\% CI `r ci_txt(k_focal)`; `r p_txt(k_focal$p.value)`). This suggests that firsthand institutional experience may shape how suspicious citizens interpret competing claims about electoral integrity. However, the contrast weakens after adjustment for continuous prior beliefs (`r fe(k_focal_p)`), and the incremental effect of adding the rebuttal alone remains uncertain (`r fe(k_rf)`). We therefore interpret the finding as exploratory evidence of an observation-conditioned response to competing claims.
+
+**Two questions we should keep apart.**
+
+(a) *Our focal question:* Does observation change the effect of encountering an allegation paired with an official response? This compares the allegation-plus-rebuttal article with the control article. The estimand is $\Delta_{2C}(b)$, and the test of whether it differs by prior belief is $\Omega_{2C} = \delta_2$. This is where the evidence is.
+
+(b) *A separate question:* Does observation make adding the official response more effective? This compares the allegation-plus-rebuttal article with the allegation-only article. The estimand is $\Delta_{21}(b)$, and $\Omega_{21} = \delta_2 - \delta_1$. The evidence here is weak, so we should not claim that observers respond more to the rebuttal itself.
+
+Table \ref{tab:key} summarizes these estimates across the four specifications. Section 1 gives the full empirical strategy.
+
+```{r key_table, results = "asis"}
+emit_tbl(make_key_tex("main", "Q119"),
+         "Key estimates at a glance: 6-item index, perceived fraud or procedural problems (Q119)\\label{tab:key}")
+```
+
+\newpage
+
+\tableofcontents
+
+\newpage
+
+# Empirical Strategy
+
+Our primary outcome, $Y_i$, measures the perceived likelihood that the vignette incident reflects election fraud or a serious procedural problem on a five-point scale. We estimate the following fully interacted ordinary least squares model:
+
+\begin{equation}
+\begin{aligned}
+Y_i ={}& \alpha
++ \beta_1 T_{1i}
++ \beta_2 T_{2i}
++ \beta_D D_i
++ \beta_B B_i \\
+&+ \gamma_1 T_{1i}D_i
++ \gamma_2 T_{2i}D_i \\
+&+ \gamma_3 T_{1i}B_i
++ \gamma_4 T_{2i}B_i
++ \gamma_5 D_iB_i \\
+&+ \delta_1 T_{1i}D_iB_i
++ \delta_2 T_{2i}D_iB_i
++ \varepsilon_i.
+\end{aligned}
+\end{equation}
+
+Here, $T_{1i}$ indicates assignment to the fraud-allegation article, and $T_{2i}$ indicates assignment to the allegation-plus-rebuttal article. The control article is the reference condition. $D_i$ indicates participation as a citizen observer, and $B_i$ indicates a pretreatment conspiracy-belief index above the citizen-sample median. Respondents at or below the median constitute the low-belief group.
+
+The model estimates separate means for all 12 combinations of article assignment, observation status, and prior-belief group. Within each observation and prior-belief group, we calculate three contrasts:
+
+\begin{align}
+\tau_{1C}(d,b) &= \beta_1 + \gamma_1 d + \gamma_3 b + \delta_1 db, \\
+\tau_{2C}(d,b) &= \beta_2 + \gamma_2 d + \gamma_4 b + \delta_2 db, \\
+\tau_{21}(d,b) &= \tau_{2C}(d,b) - \tau_{1C}(d,b),
+\end{align}
+
+where $d\in\{0,1\}$ denotes non-observers and observers, respectively, and $b\in\{0,1\}$ denotes respondents with low and high prior conspiracy beliefs, respectively. The subscripts identify the article comparisons, with $C$ denoting control. The first contrast captures the effect of adding the fraud allegation relative to control. The second captures the combined effect of the allegation and official rebuttal relative to control. The third isolates the incremental effect of adding the official rebuttal to the allegation. These contrasts equal the corresponding differences in sample means.
+
+We assess heterogeneity by directly comparing treatment contrasts. Let $k\in\{1C,2C,21\}$ index the three article comparisons: treatment 1 (fraud allegation) versus control, treatment 2 (allegation plus rebuttal) versus control, and treatment 2 versus treatment 1, respectively. Each contrast subtracts the mean in the second condition from the mean in the first; the final comparison isolates the incremental effect of the official rebuttal. For each comparison, the difference in treatment effects between observers and non-observers within prior-belief group $b$ is:
+
+\begin{equation}
+\Delta_k(b) = \tau_k(1,b) - \tau_k(0,b).
+\end{equation}
+
+We then test whether this difference varies between high- and low-belief respondents:
+
+\begin{equation}
+\Omega_k = \Delta_k(1) - \Delta_k(0).
+\end{equation}
+
+The corresponding three-way contrasts are $\delta_1$, $\delta_2$, and $\delta_2-\delta_1$ for fraud versus control, allegation plus rebuttal versus control, and rebuttal versus fraud, respectively. We also compare high- and low-belief respondents within each observation group. We calculate robust standard errors and report two-sided tests and 95\% confidence intervals.
+
+Finally, we examine the continuous pretreatment belief index using the binning estimator implemented in \texttt{interflex} (Hainmueller, Mummolo, and Xu 2019). For each pairwise article comparison, we estimate effects separately among observers and non-observers using bins defined by the median. We display the index distributions across article conditions to assess common support. Because the subgroup pattern was identified post hoc and was not preregistered, we interpret the findings as exploratory.
+
+## How the tables map to the notation
+
+- "Effects within groups" (Panel A of the contrast tables) are $\tau_k(d,b)$.
+- "Differences between observers and non-observers" (Panel B) are $\Delta_k(b)$.
+- "High minus low prior beliefs" (Panel C) is $\Omega_k$. For allegation plus rebuttal versus control, it equals $\delta_2$ in the three-way interaction table.
+- All contrasts come from a saturated model with one mean per cell. HC2 robust standard errors. Brackets show Holm-adjusted $p$-values within each panel.
+- Specifications: no covariates; demographic controls (gender, age, marital status, education); demographic controls plus the continuous version of the same prior-belief measure, added either additively or interacted with every cell (Lin 2013).
+
+## Prior-belief measures
+
+All measures average recoded Q18 items (1--4, higher = stronger conspiracy belief) and split the citizen sample at its median (high = above the median). The 6-item index is the main measure. Sections 4 and 5 repeat every measure-specific table and figure with the 3-item average of the conspiracy-worded items and with the single China item.
+
+```{r measures_table, results = "asis"}
+mt_lines <- c(
+  "\\begin{tblr}{colspec={lX[l]rrrr}, width=\\linewidth, cells={font=\\footnotesize}}",
+  "\\toprule",
+  "Measure & Items & {Median\\\\cutoff} & {Share above\\\\median} & N & {Same group as\\\\6-item split} \\\\",
+  "\\midrule",
+  sprintf("%s & %s & %.3f & %.3f & %d & %.3f \\\\", meas_tbl$Measure, gsub("_", "\\\\_", meas_tbl$Items),
+          meas_tbl$Cutoff, meas_tbl$`Share above median`, as.integer(meas_tbl$`N (valid)`),
+          meas_tbl$`Same group as 6-item split`),
+  "\\bottomrule", "\\end{tblr}")
+emit_tbl(mt_lines, "Prior-belief measures used in this document")
+```
+
+```{r measures_fig, results = "asis"}
+dist_df <- bind_rows(lapply(names(REPORT_MODS), function(k)
+  tibble(measure = REPORT_MODS[[k]], value = df_cit[[CONSP_CONT[[k]]]], med = CONSP_MED[[k]]))) |>
+  filter(!is.na(value)) |>
+  mutate(measure = factor(measure, levels = unname(REPORT_MODS)))
+p_dist <- ggplot(dist_df, aes(x = value)) +
+  geom_histogram(aes(y = after_stat(count / tapply(count, PANEL, sum)[PANEL] * 100)),
+                 breaks = seq(0.9375, 4.0625, by = 0.125), fill = "#4472C4", color = "white") +
+  geom_vline(aes(xintercept = med), linetype = "dashed") +
+  facet_wrap(~ measure, nrow = 1) +
+  labs(x = "Prior conspiracy belief (1-4)", y = "Percent of citizens") +
+  theme_classic(base_size = 14) +
+  theme(strip.background = element_blank(), strip.text = element_text(face = "bold"))
+emit_fig(p_dist, "Distribution of the three prior-belief measures among citizens. Dashed line: citizen-sample median (respondents above it form the high-belief group).",
+         w = 12, h = 4)
+```
+
+# Sample and Design Checks
+
+The sample is citizen observer applicants (`citizen_all == 1`; N = `r nrow(df_cit)`). Observers were selected by lottery; articles were randomly assigned.
+
+```{r sumstat, results = "asis"}
+emit_tbl(make_sum_stat_tex(sum_df), "Summary statistics (citizen sample)")
+```
+
+```{r balance, results = "asis"}
+emit_tbl(make_cov_bal_1_tex(bal_part), "Covariate balance: observers vs. non-observers")
+emit_tbl(make_cov_bal_2_tex(bal_vig), "Covariate balance across articles ($p$-value: F-test of equal means)")
+```
+
+*Interpretation.* The smallest $p$-value across the five demographic covariates is `r sprintf("%.3f", min(bal_part$p_value, na.rm = TRUE))` for observation status and `r sprintf("%.3f", min(bal_vig$p_value, na.rm = TRUE))` for article assignment. `r if (min(c(bal_part$p_value, bal_vig$p_value), na.rm = TRUE) > 0.05) "Both randomizations look balanced on observables." else "At least one covariate differs at the 5\\% level; we should check it before the meeting."` Balance of prior beliefs *within* the observation $\times$ prior-belief groups is in Section 3.7.
+
+# Main Results: 6-Item Prior-Belief Index
+
+## Average effects of the articles
+
+```{r pooled_tables, results = "asis"}
+for (v in c("Q119", "Q122", "Q123")) {
+  emit_tbl(tbl_pooled(v), paste0("Pooled effects on ", out_short(v),
+                                 ". Columns 1--2: additive; columns 3--4: article $\\times$ observer"))
+}
+```
+
+```{r pooled_figs, results = "asis"}
+res_main <- res_all |> filter(moderator == "main")
+for (v in c("Q119", "Q122")) {
+  emit_fig(plot_overall(res_main, v, SPEC_SETS$main, by_obs = FALSE),
+           paste0("Article effects on ", out_short(v), ", all citizens"), w = 12, h = 3.8)
+  emit_fig(plot_overall(res_main, v, SPEC_SETS$main, by_obs = TRUE),
+           paste0("Article effects on ", out_short(v), ", by observation status"), w = 12, h = 5.5)
+}
+p_all_fc <- est_row(cn = CN_FC, g = "All", l = LV_ALL)
+p_all_rc <- est_row(cn = CN_RC, g = "All", l = LV_ALL)
+p_all_rf <- est_row(cn = CN_RF, g = "All", l = LV_ALL)
+p_dif_rc <- est_row(cn = CN_RC, g = "All", l = LV_DIFF)
+```
+
+*Interpretation.* Pooling all citizens, the fraud article changes perceived fraud by `r fe(p_all_fc)` relative to control, and the allegation-plus-rebuttal article by `r fe(p_all_rc)`. The rebuttal-versus-fraud difference is `r fe(p_all_rf)`. Without the prior-belief split, the observer--non-observer difference in the allegation-plus-rebuttal effect is `r fe(p_dif_rc)`. The next sections ask whether this pooled comparison hides heterogeneity by prior beliefs.
+
+## Raw means by observation status and prior belief
+
+```{r cibars_main, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  emit_fig(cibar_by_obs(v), paste0("Mean ", out_short(v),
+           " by article, observers vs. non-observers. Bars: 95\\% CIs; brackets: Welch $t$-test $p$-values"),
+           w = 10, h = 5)
+  emit_fig(cibar_by_belief(v, "main"), paste0("Mean ", out_short(v),
+           " by article, observation status, and prior belief (6-item index)"), w = 10, h = 8)
+}
+```
+
+*Interpretation.* The key panel is the top row of the Q119 figure (high prior belief). Among high-belief observers, the allegation-plus-rebuttal article changes perceived fraud by `r fe(k_obs_hi)` relative to control; among high-belief non-observers, by `r fe(k_non_hi)`. The bottom row shows the same comparison for low-belief citizens. The bars show raw means, so these differences equal the contrasts in the tables below (without covariates).
+
+## Focal contrast: allegation plus rebuttal vs. control
+
+```{r maintext_tables, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  emit_tbl(make_main_text_tex(res_all, v, "main"),
+           paste0("Effect of the allegation-plus-rebuttal article relative to control on ", out_short(v),
+                  ", by observation status and prior belief (6-item index)"))
+}
+k122 <- est_row(var = "Q122")
+```
+
+*Interpretation.* This is the candidate main-text table. For Q119, the observer--non-observer difference among high-belief citizens, $\Delta_{2C}(1)$, is `r fe_ci(k_focal)`. Among low-belief citizens, $\Delta_{2C}(0)$ is `r fe(k_low)`. For trust in election administration (Q122), $\Delta_{2C}(1)$ is `r fe(k122)`; a positive value would mean observers' trust rises relative to non-observers'.
+
+## All contrasts by observation status and prior belief
+
+```{r si_main, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  emit_tbl(make_si_tex(res_all |> filter(moderator == "main"), v, SPEC_SETS$main, MOD_NOTE[["main"]]),
+           paste0("All article contrasts for ", out_short(v), ": no covariates and demographic controls (6-item index)"), fit = TRUE)
+  emit_fig(plot_contrasts(res_all |> filter(moderator == "main"), v, SPEC_SETS$main),
+           paste0("Article contrasts for ", out_short(v), " by observation status and prior belief (6-item index)"),
+           w = 12, h = 7)
+}
+k_holm <- k_focal$p.holm
+```
+
+*Interpretation.* Panel C tests whether the observer--non-observer gap differs by prior belief. For allegation plus rebuttal versus control, $\Omega_{2C}$ is `r fe(k_omega)`. The Holm-adjusted $p$-value for $\Delta_{2C}(1)$ in Panel B is `r sprintf("%.3f", k_holm)`. For rebuttal versus fraud (question b), $\Delta_{21}(1)$ is `r fe(k_rf)` and $\Omega_{21}$ is `r fe(k_rf_om)`. In the figure, the middle column corresponds to question (a) and the right column to question (b).
+
+## Three-way interaction regression
+
+```{r threeway_main, results = "asis"}
+emit_tbl(tbl_threeway("main"),
+         "Three-way interaction model (6-item index). Reference: control article, non-observers, low prior belief",
+         small = TRUE, fit = TRUE)
+```
+
+*Interpretation.* This table reports the regression in the Empirical Strategy. The (Fraud + Rebuttal) $\times$ Observer $\times$ High prior belief coefficient is $\delta_2 = \Omega_{2C}$ and matches Panel C of the contrast table (`r num(k_omega$estimate, 3)` without covariates). The Fraud $\times$ Observer $\times$ High coefficient is $\delta_1$.
+
+## Adjusting for continuous prior beliefs
+
+```{r si_appx, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  emit_tbl(make_si_tex(res_all |> filter(moderator == "main"), v, SPEC_SETS$appx, MOD_NOTE[["main"]]),
+           paste0("All article contrasts for ", out_short(v), ": adding the continuous 6-item index"), fit = TRUE)
+  emit_fig(plot_contrasts(res_all |> filter(moderator == "main"), v, SPEC_SETS$appx),
+           paste0("Article contrasts for ", out_short(v), ", adding the continuous 6-item index"),
+           w = 12, h = 7)
+  emit_fig(plot_overall(res_all |> filter(moderator == "main"), v, SPEC_SETS$appx, by_obs = TRUE),
+           paste0("Article effects on ", out_short(v), " by observation status, adding the continuous 6-item index"),
+           w = 12, h = 5.5)
+}
+```
+
+*Interpretation.* The median split groups respondents with different prior beliefs. Within a group, the arms can still differ somewhat in the continuous index. Adding the continuous index moves $\Delta_{2C}(1)$ from `r num(k_focal$estimate)` (no covariates) and `r num(k_focal_d$estimate)` (demographic controls) to `r fe(k_focal_p)` (additive) and `r fe(k_focal_l)` (Lin). This is the "weakens after adjustment" caveat in the key takeaway.
+
+## Balance of prior beliefs within groups
+
+```{r balance_prior_main, results = "asis"}
+emit_tbl(make_balance_prior_tex("main"),
+         "Continuous 6-item index by observation status, prior-belief group, and article")
+sd_obs_hi <- prior_std_diff("main", "Obs", "Hi")
+sd_non_hi <- prior_std_diff("main", "Non", "Hi")
+```
+
+*Interpretation.* Within the high-belief group, the standardized difference in the continuous index between the allegation-plus-rebuttal and control arms is `r num(sd_obs_hi)` among observers and `r num(sd_non_hi)` among non-observers. Differences of this kind are one reason the adjusted estimates in Section 3.6 can differ from the unadjusted ones.
+
+## Continuous moderator (interflex)
+
+```{r interflex_main, results = "asis"}
+for (bn in c("median", "terciles")) {
+  for (sp in names(IF_SPECS)) {
+    for (v in c("Q119", "Q122")) {
+      safely(emit_fig(plot_if(v, sp, bn, "main"),
+                      paste0("Conditional effects on ", out_short(v), " over the continuous 6-item index (",
+                             tolower(sp), "; ", bn, " bins)"), w = 12, h = 8),
+             paste("interflex figure", v, sp, bn))
+    }
+  }
+}
+for (bn in c("median", "terciles")) {
+  safely(emit_tbl(wald_tex("main", bn),
+                  paste0("Wald tests of the linear interaction model against the binning model (6-item index; ",
+                         bn, " bins)"), small = TRUE, fit = TRUE),
+         "Wald table")
+}
+if_hi <- if_bin |> filter(mod == "main", outcome == "Q119", spec == "No covariates",
+                          bins == "median", contrast == CN_RC, x > med_6)
+if_hi_obs <- if_hi |> filter(obs == "Obs")
+if_hi_non <- if_hi |> filter(obs == "Non")
+```
+
+```{r interflex_diag, results = "asis"}
+emit_tbl(knitr::kable(compare_tbl |> mutate(obs = ifelse(obs == "Obs", "Observers", "Non-observers")),
+                      format = "latex", booktabs = TRUE, linesep = "",
+                      col.names = c("Outcome", "Group", "Prior belief", "Comparison",
+                                    "Diff. in means", "Section 7", "Local linear", "interflex")),
+         "Check: interflex binned estimates (median bins, no covariates) vs. differences in means", small = TRUE, fit = TRUE)
+```
+
+*Interpretation.* The binned estimates come from a local linear fit within each bin, evaluated at the bin median, so they need not equal the median-split differences in means; the check table shows how large the gap is. Above the median, the interflex estimate for allegation plus rebuttal versus control is `r if (nrow(if_hi_obs) == 1) num(if_hi_obs$estimate) else "n/a"` among observers and `r if (nrow(if_hi_non) == 1) num(if_hi_non$estimate) else "n/a"` among non-observers (Q119, no covariates). The histograms at the bottom of each panel show whether both arms have support across the index. Wald $p$-values below 0.05 suggest the linear interaction model is too restrictive.
+
+## Subgroup regression tables by prior belief
+
+```{r bybelief_tables, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  emit_tbl(tbl_by_belief(v, "main"),
+           paste0("Effects on ", out_short(v), " within prior-belief groups (6-item index)"), small = TRUE, fit = TRUE)
+}
+```
+
+*Interpretation.* These tables estimate the pooled specification separately for high- and low-belief citizens. The (Fraud + Rebuttal) $\times$ Observer coefficient in column 3 of Panel A equals $\Delta_{2C}(1)$, and in Panel B it equals $\Delta_{2C}(0)$.
+
+## Robustness: party identification and perceived fairness
+
+```{r other_mods, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  for (am in names(ALT_MODS)) {
+    emit_fig(plot_contrasts(res_other |> filter(moderator == am), v, SPEC_SETS$main,
+                            ALT_MODS[[am]]$lo, ALT_MODS[[am]]$hi),
+             paste0("Article contrasts for ", out_short(v), ", split by ",
+                    if (am == "ppp") "PPP identification" else "perceived fairness of the 2024 election"),
+             w = 12, h = 7)
+  }
+  emit_fig(plot_contrasts(res_other |> filter(moderator == "prior_std_main"), v, names(STD_SPECS)),
+           paste0("Article contrasts for ", out_short(v), " by prior belief (6-item index), standardized to party and fairness composition"),
+           w = 12, h = 7)
+}
+o_ppp  <- est_row(mod = "ppp",  res = res_other)
+o_fair <- est_row(mod = "fair", res = res_other)
+o_std  <- est_row(mod = "prior_std_main", spec = "Standardized: party + fairness", res = res_other)
+```
+
+*Interpretation.* Is the prior-belief pattern just party or fairness perceptions under another name? Splitting by PPP identification instead, the observer--non-observer difference in the allegation-plus-rebuttal effect among PPP identifiers/leaners is `r fe(o_ppp)`. Splitting by perceived fairness, it is `r fe(o_fair)` among those with high perceived fairness. When the prior-belief contrasts are standardized to the same party and fairness composition, $\Delta_{2C}(1)$ is `r fe(o_std)`.
+
+## Robustness: number of items in the index
+
+```{r robust_items, results = "asis"}
+for (v in c("Q119", "Q122")) {
+  emit_fig(plot_robust_items(v),
+           paste0("Focal estimates for ", out_short(v), " across prior-belief measures built from 1 to 6 items"),
+           w = 12, h = 5.5)
+}
+rob_rng <- rob |> filter(outcome == "Q119", spec == "No covariates", estimand == ROB_EST[2]) |>
+  summarise(lo = min(estimate), hi = max(estimate))
+```
+
+*Interpretation.* Across measures built from 1 to 6 items, $\Delta_{2C}(1)$ for Q119 (no covariates) ranges from `r num(rob_rng$lo)` to `r num(rob_rng$hi)`. Sections 4 and 5 show the full set of results for the 3-item and 1-item measures.
+
+```{r alt_measure_fn, include = FALSE}
+## Full repeat of the measure-specific tables and figures for one measure
+report_measure <- function(mod) {
+  nm  <- REPORT_MODS[[mod]]
+  mi  <- meas_tbl |> filter(mod == !!mod)
+  kf  <- est_row(mod = mod)
+  kfp <- est_row(mod = mod, spec = "Demographic + prior belief")
+  kom <- est_row(mod = mod, g = "Hi - Lo")
+  krf <- est_row(mod = mod, cn = CN_RF)
+  ks  <- est_row(mod = paste0("prior_std_", mod), spec = "Standardized: party + fairness", res = res_other)
+
+  emit_md("This section repeats every measure-specific table and figure with the ", nm, " (",
+          gsub("_", "\\\\_", mi$Items), "). The citizen-sample median is ", sprintf("%.3f", mi$Cutoff),
+          "; ", sprintf("%.1f", 100 * mi$`Share above median`), "\\% of citizens are above it, and ",
+          sprintf("%.1f", 100 * mi$`Same group as 6-item split`),
+          "\\% fall in the same group as under the 6-item split. Tables and figures that do not depend ",
+          "on the prior-belief measure (summary statistics, balance, pooled effects, party and fairness ",
+          "splits) are in Sections 2 and 3.")
+  emit_md("*Summary.* For Q119, $\\Delta_{2C}(1)$ is ", fe_ci(kf), " without covariates and ",
+          fe(kfp), " after adding the continuous ", nm, ". $\\Omega_{2C}$ is ", fe(kom),
+          ". For rebuttal versus fraud, $\\Delta_{21}(1)$ is ", fe(krf),
+          ". Standardized to party and fairness composition, $\\Delta_{2C}(1)$ is ", fe(ks), ".")
+
+  emit_md("## Key estimates")
+  emit_tbl(make_key_tex(mod, "Q119"), paste0("Key estimates: ", nm, ", Q119"))
+  emit_tbl(make_key_tex(mod, "Q122"), paste0("Key estimates: ", nm, ", Q122"))
+
+  emit_md("## Raw means by observation status and prior belief")
+  for (v in c("Q119", "Q122")) {
+    emit_fig(cibar_by_belief(v, mod), paste0("Mean ", out_short(v),
+             " by article, observation status, and prior belief (", nm, ")"), w = 10, h = 8)
+  }
+
+  emit_md("## Focal contrast: allegation plus rebuttal vs. control")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(make_main_text_tex(res_all, v, mod),
+             paste0("Effect of the allegation-plus-rebuttal article relative to control on ",
+                    out_short(v), " (", nm, ")"))
+  }
+
+  emit_md("## All contrasts by observation status and prior belief")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(make_si_tex(res_all |> filter(moderator == mod), v, SPEC_SETS$main, MOD_NOTE[[mod]]),
+             paste0("All article contrasts for ", out_short(v), ": no covariates and demographic controls (", nm, ")"), fit = TRUE)
+    emit_fig(plot_contrasts(res_all |> filter(moderator == mod), v, SPEC_SETS$main),
+             paste0("Article contrasts for ", out_short(v), " by observation status and prior belief (", nm, ")"),
+             w = 12, h = 7)
+  }
+
+  emit_md("## Three-way interaction regression")
+  emit_tbl(tbl_threeway(mod), paste0("Three-way interaction model (", nm, ")"), small = TRUE, fit = TRUE)
+
+  emit_md("## Adjusting for continuous prior beliefs")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(make_si_tex(res_all |> filter(moderator == mod), v, SPEC_SETS$appx, MOD_NOTE[[mod]]),
+             paste0("All article contrasts for ", out_short(v), ": adding the continuous ", nm), fit = TRUE)
+    emit_fig(plot_contrasts(res_all |> filter(moderator == mod), v, SPEC_SETS$appx),
+             paste0("Article contrasts for ", out_short(v), ", adding the continuous ", nm), w = 12, h = 7)
+  }
+
+  emit_md("## Balance of prior beliefs within groups")
+  emit_tbl(make_balance_prior_tex(mod),
+           paste0("Continuous ", nm, " by observation status, prior-belief group, and article"))
+
+  emit_md("## Continuous moderator (interflex)")
+  for (bn in c("median", "terciles")) {
+    for (sp in names(IF_SPECS)) {
+      for (v in c("Q119", "Q122")) {
+        safely(emit_fig(plot_if(v, sp, bn, mod),
+                        paste0("Conditional effects on ", out_short(v), " over the continuous ", nm,
+                               " (", tolower(sp), "; ", bn, " bins)"), w = 12, h = 8),
+               paste("interflex figure", v, sp, bn))
+      }
+    }
+  }
+  for (bn in c("median", "terciles")) {
+    safely(emit_tbl(wald_tex(mod, bn), paste0("Wald tests of the linear interaction model (", nm, "; ",
+                                              bn, " bins)"), small = TRUE, fit = TRUE),
+           "Wald table")
+  }
+
+  emit_md("## Subgroup regression tables by prior belief")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(tbl_by_belief(v, mod),
+             paste0("Effects on ", out_short(v), " within prior-belief groups (", nm, ")"), small = TRUE, fit = TRUE)
+  }
+
+  emit_md("## Standardized to party and fairness composition")
+  for (v in c("Q119", "Q122")) {
+    emit_fig(plot_contrasts(res_other |> filter(moderator == paste0("prior_std_", mod)), v, names(STD_SPECS)),
+             paste0("Article contrasts for ", out_short(v), " by prior belief (", nm,
+                    "), standardized to party and fairness composition"), w = 12, h = 7)
+  }
+}
+```
+
+\newpage
+
+# Robustness: 3-Item Average (Q18\_2, Q18\_5, Q18\_8)
+
+```{r alt_3avg, results = "asis"}
+report_measure("3avg")
+```
+
+\newpage
+
+# Robustness: 1-Item Measure (Q18\_5)
+
+```{r alt_1avg, results = "asis"}
+report_measure("1avg")
+```
+
+```{r interflex_failures, results = "asis"}
+if (length(if_fail) > 0) {
+  emit_md("\\newpage")
+  emit_md("# Note: interflex runs that did not finish {-}")
+  emit_md("The following interflex runs returned an error and are omitted from the figures above. ",
+          "Tercile bins can fail for a measure with few distinct values (e.g., the 1-item measure).")
+  cat(paste0("- ", gsub("_", "\\\\_", if_fail), collapse = "\n"), "\n")
+}
+```
