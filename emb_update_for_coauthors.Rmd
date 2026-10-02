@@ -1319,6 +1319,102 @@ compare_tbl <- diag_tbl |>
   mutate(across(where(is.numeric), ~ round(.x, 3)))
 ```
 
+```{r alt_measure_fn, include = FALSE}
+## Full repeat of the measure-specific tables and figures for one measure
+report_measure <- function(mod) {
+  nm  <- REPORT_MODS[[mod]]
+  mi  <- meas_tbl |> filter(mod == !!mod)
+  kf  <- est_row(mod = mod)
+  kfp <- est_row(mod = mod, spec = "Demographic + prior belief")
+  kom <- est_row(mod = mod, g = "Hi - Lo")
+  krf <- est_row(mod = mod, cn = CN_RF)
+  ks  <- est_row(mod = paste0("prior_std_", mod), spec = "Standardized: party + fairness", res = res_other)
+
+  emit_md("This section repeats every measure-specific table and figure with the ", nm, " (",
+          gsub("_", "\\\\_", mi$Items), "). The citizen-sample median is ", sprintf("%.3f", mi$Cutoff),
+          "; ", sprintf("%.1f", 100 * mi$`Share above median`), "\\% of citizens are above it, and ",
+          sprintf("%.1f", 100 * mi$`Same group as 6-item split`),
+          "\\% fall in the same group as under the 6-item split. Tables and figures that do not depend ",
+          "on the prior-belief measure (summary statistics, balance, pooled effects, party and fairness ",
+          "splits) are in Sections 2 and 3.")
+  emit_md("*Summary.* For Q119, $\\Delta_{2C}(1)$ is ", fe_ci(kf), " without covariates and ",
+          fe(kfp), " after adding the continuous ", nm, ". $\\Omega_{2C}$ is ", fe(kom),
+          ". For rebuttal versus fraud, $\\Delta_{21}(1)$ is ", fe(krf),
+          ". Standardized to party and fairness composition, $\\Delta_{2C}(1)$ is ", fe(ks), ".")
+
+  emit_md("## Key estimates")
+  emit_tbl(make_key_tex(mod, "Q119"), paste0("Key estimates: ", nm, ", Q119"))
+  emit_tbl(make_key_tex(mod, "Q122"), paste0("Key estimates: ", nm, ", Q122"))
+
+  emit_md("## Raw means by observation status and prior belief")
+  for (v in c("Q119", "Q122")) {
+    emit_fig(cibar_by_belief(v, mod), paste0("Mean ", out_short(v),
+             " by article, observation status, and prior belief (", nm, ")"), w = 10, h = 8)
+  }
+
+  emit_md("## Focal contrast: allegation plus rebuttal vs. control")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(make_main_text_tex(res_all, v, mod),
+             paste0("Effect of the allegation-plus-rebuttal article relative to control on ",
+                    out_short(v), " (", nm, ")"))
+  }
+
+  emit_md("## All contrasts by observation status and prior belief")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(make_si_tex(res_all |> filter(moderator == mod), v, SPEC_SETS$main, MOD_NOTE[[mod]]),
+             paste0("All article contrasts for ", out_short(v), ": no covariates and demographic controls (", nm, ")"), fit = TRUE)
+    emit_fig(plot_contrasts(res_all |> filter(moderator == mod), v, SPEC_SETS$main),
+             paste0("Article contrasts for ", out_short(v), " by observation status and prior belief (", nm, ")"),
+             w = 12, h = 7)
+  }
+
+  emit_md("## Three-way interaction regression")
+  emit_tbl(tbl_threeway(mod), paste0("Three-way interaction model (", nm, ")"), small = TRUE, fit = TRUE)
+
+  emit_md("## Adjusting for continuous prior beliefs")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(make_si_tex(res_all |> filter(moderator == mod), v, SPEC_SETS$appx, MOD_NOTE[[mod]]),
+             paste0("All article contrasts for ", out_short(v), ": adding the continuous ", nm), fit = TRUE)
+    emit_fig(plot_contrasts(res_all |> filter(moderator == mod), v, SPEC_SETS$appx),
+             paste0("Article contrasts for ", out_short(v), ", adding the continuous ", nm), w = 12, h = 7)
+  }
+
+  emit_md("## Balance of prior beliefs within groups")
+  emit_tbl(make_balance_prior_tex(mod),
+           paste0("Continuous ", nm, " by observation status, prior-belief group, and article"))
+
+  emit_md("## Continuous moderator (interflex)")
+  for (bn in c("median", "terciles")) {
+    for (sp in names(IF_SPECS)) {
+      for (v in c("Q119", "Q122")) {
+        safely(emit_fig(plot_if(v, sp, bn, mod),
+                        paste0("Conditional effects on ", out_short(v), " over the continuous ", nm,
+                               " (", tolower(sp), "; ", bn, " bins)"), w = 12, h = 8),
+               paste("interflex figure", v, sp, bn))
+      }
+    }
+  }
+  for (bn in c("median", "terciles")) {
+    safely(emit_tbl(wald_tex(mod, bn), paste0("Wald tests of the linear interaction model (", nm, "; ",
+                                              bn, " bins)"), small = TRUE, fit = TRUE),
+           "Wald table")
+  }
+
+  emit_md("## Subgroup regression tables by prior belief")
+  for (v in c("Q119", "Q122")) {
+    emit_tbl(tbl_by_belief(v, mod),
+             paste0("Effects on ", out_short(v), " within prior-belief groups (", nm, ")"), small = TRUE, fit = TRUE)
+  }
+
+  emit_md("## Standardized to party and fairness composition")
+  for (v in c("Q119", "Q122")) {
+    emit_fig(plot_contrasts(res_other |> filter(moderator == paste0("prior_std_", mod)), v, names(STD_SPECS)),
+             paste0("Article contrasts for ", out_short(v), " by prior belief (", nm,
+                    "), standardized to party and fairness composition"), w = 12, h = 7)
+  }
+}
+```
+
 ```{r inline_helpers, include = FALSE}
 ## Numbers quoted in the text ---------------------------------------------------
 est_row <- function(mod = "main", var = "Q119", spec = "No covariates",
@@ -1684,102 +1780,6 @@ rob_rng <- rob |> filter(outcome == "Q119", spec == "No covariates", estimand ==
 ```
 
 *Interpretation.* Across measures built from 1 to 6 items, $\Delta_{2C}(1)$ for Q119 (no covariates) ranges from `r num(rob_rng$lo)` to `r num(rob_rng$hi)`. Sections 4 and 5 show the full set of results for the 3-item and 1-item measures.
-
-```{r alt_measure_fn, include = FALSE}
-## Full repeat of the measure-specific tables and figures for one measure
-report_measure <- function(mod) {
-  nm  <- REPORT_MODS[[mod]]
-  mi  <- meas_tbl |> filter(mod == !!mod)
-  kf  <- est_row(mod = mod)
-  kfp <- est_row(mod = mod, spec = "Demographic + prior belief")
-  kom <- est_row(mod = mod, g = "Hi - Lo")
-  krf <- est_row(mod = mod, cn = CN_RF)
-  ks  <- est_row(mod = paste0("prior_std_", mod), spec = "Standardized: party + fairness", res = res_other)
-
-  emit_md("This section repeats every measure-specific table and figure with the ", nm, " (",
-          gsub("_", "\\\\_", mi$Items), "). The citizen-sample median is ", sprintf("%.3f", mi$Cutoff),
-          "; ", sprintf("%.1f", 100 * mi$`Share above median`), "\\% of citizens are above it, and ",
-          sprintf("%.1f", 100 * mi$`Same group as 6-item split`),
-          "\\% fall in the same group as under the 6-item split. Tables and figures that do not depend ",
-          "on the prior-belief measure (summary statistics, balance, pooled effects, party and fairness ",
-          "splits) are in Sections 2 and 3.")
-  emit_md("*Summary.* For Q119, $\\Delta_{2C}(1)$ is ", fe_ci(kf), " without covariates and ",
-          fe(kfp), " after adding the continuous ", nm, ". $\\Omega_{2C}$ is ", fe(kom),
-          ". For rebuttal versus fraud, $\\Delta_{21}(1)$ is ", fe(krf),
-          ". Standardized to party and fairness composition, $\\Delta_{2C}(1)$ is ", fe(ks), ".")
-
-  emit_md("## Key estimates")
-  emit_tbl(make_key_tex(mod, "Q119"), paste0("Key estimates: ", nm, ", Q119"))
-  emit_tbl(make_key_tex(mod, "Q122"), paste0("Key estimates: ", nm, ", Q122"))
-
-  emit_md("## Raw means by observation status and prior belief")
-  for (v in c("Q119", "Q122")) {
-    emit_fig(cibar_by_belief(v, mod), paste0("Mean ", out_short(v),
-             " by article, observation status, and prior belief (", nm, ")"), w = 10, h = 8)
-  }
-
-  emit_md("## Focal contrast: allegation plus rebuttal vs. control")
-  for (v in c("Q119", "Q122")) {
-    emit_tbl(make_main_text_tex(res_all, v, mod),
-             paste0("Effect of the allegation-plus-rebuttal article relative to control on ",
-                    out_short(v), " (", nm, ")"))
-  }
-
-  emit_md("## All contrasts by observation status and prior belief")
-  for (v in c("Q119", "Q122")) {
-    emit_tbl(make_si_tex(res_all |> filter(moderator == mod), v, SPEC_SETS$main, MOD_NOTE[[mod]]),
-             paste0("All article contrasts for ", out_short(v), ": no covariates and demographic controls (", nm, ")"), fit = TRUE)
-    emit_fig(plot_contrasts(res_all |> filter(moderator == mod), v, SPEC_SETS$main),
-             paste0("Article contrasts for ", out_short(v), " by observation status and prior belief (", nm, ")"),
-             w = 12, h = 7)
-  }
-
-  emit_md("## Three-way interaction regression")
-  emit_tbl(tbl_threeway(mod), paste0("Three-way interaction model (", nm, ")"), small = TRUE, fit = TRUE)
-
-  emit_md("## Adjusting for continuous prior beliefs")
-  for (v in c("Q119", "Q122")) {
-    emit_tbl(make_si_tex(res_all |> filter(moderator == mod), v, SPEC_SETS$appx, MOD_NOTE[[mod]]),
-             paste0("All article contrasts for ", out_short(v), ": adding the continuous ", nm), fit = TRUE)
-    emit_fig(plot_contrasts(res_all |> filter(moderator == mod), v, SPEC_SETS$appx),
-             paste0("Article contrasts for ", out_short(v), ", adding the continuous ", nm), w = 12, h = 7)
-  }
-
-  emit_md("## Balance of prior beliefs within groups")
-  emit_tbl(make_balance_prior_tex(mod),
-           paste0("Continuous ", nm, " by observation status, prior-belief group, and article"))
-
-  emit_md("## Continuous moderator (interflex)")
-  for (bn in c("median", "terciles")) {
-    for (sp in names(IF_SPECS)) {
-      for (v in c("Q119", "Q122")) {
-        safely(emit_fig(plot_if(v, sp, bn, mod),
-                        paste0("Conditional effects on ", out_short(v), " over the continuous ", nm,
-                               " (", tolower(sp), "; ", bn, " bins)"), w = 12, h = 8),
-               paste("interflex figure", v, sp, bn))
-      }
-    }
-  }
-  for (bn in c("median", "terciles")) {
-    safely(emit_tbl(wald_tex(mod, bn), paste0("Wald tests of the linear interaction model (", nm, "; ",
-                                              bn, " bins)"), small = TRUE, fit = TRUE),
-           "Wald table")
-  }
-
-  emit_md("## Subgroup regression tables by prior belief")
-  for (v in c("Q119", "Q122")) {
-    emit_tbl(tbl_by_belief(v, mod),
-             paste0("Effects on ", out_short(v), " within prior-belief groups (", nm, ")"), small = TRUE, fit = TRUE)
-  }
-
-  emit_md("## Standardized to party and fairness composition")
-  for (v in c("Q119", "Q122")) {
-    emit_fig(plot_contrasts(res_other |> filter(moderator == paste0("prior_std_", mod)), v, names(STD_SPECS)),
-             paste0("Article contrasts for ", out_short(v), " by prior belief (", nm,
-                    "), standardized to party and fairness composition"), w = 12, h = 7)
-  }
-}
-```
 
 \newpage
 
